@@ -1,0 +1,7 @@
+motherduck:
+  target: prod
+  outputs:
+    prod:
+      type: duckdb
+      path: "md:f1?motherduck_token={{ env_var('MOTHERDUCK_TOKEN') }}"
+      threads: 4
