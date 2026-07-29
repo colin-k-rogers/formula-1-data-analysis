@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: openf1
+    database: f1
+    schema: raw
+    tables:
+      - name: meetings
+      - name: sessions
+      - name: drivers
+      - name: laps

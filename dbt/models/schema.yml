@@ -1,0 +1,37 @@
+version: 2
+
+models:
+  - name: dim_sessions
+    columns:
+      - name: session_key
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_drivers
+    columns:
+      - name: driver_number
+        tests:
+          - unique
+          - not_null
+
+  - name: fct_laps
+    columns:
+      - name: session_key
+        tests:
+          - not_null
+      - name: driver_number
+        tests:
+          - not_null
+      - name: lap_number
+        tests:
+          - not_null
+
+  - name: fct_lap_pace
+    columns:
+      - name: session_key
+        tests:
+          - not_null
+      - name: driver_number
+        tests:
+          - not_null
