@@ -13,6 +13,6 @@ select
     i2_speed,
     st_speed
 from {{ ref('stg_openf1__laps') }}
-where is_pit_out_lap = false
+where coalesce(is_pit_out_lap, false) = false
   and lap_duration is not null
   and lap_duration > 0

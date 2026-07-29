@@ -36,6 +36,23 @@ def fetch(endpoint, params):
 def load_table(con, tmp_path, records, table, key_columns, key_values):
     """Bulk-load `records` (a list of dicts) into f1.raw.<table>, replacing any
     existing rows matching key_values on key_columns (delete+insert upsert)."""
+    if key_values:
+        table_exists = con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_catalog = 'f1' AND table_schema = 'raw' AND table_name = ?",
+            [table],
+        ).fetchone()[0] > 0
+        # Delete stale rows for these keys even if this run fetched zero
+        # records for them, so a session that now returns nothing doesn't
+        # leave old rows behind.
+        if table_exists:
+            placeholders = ", ".join("?" for _ in key_values)
+            key_expr = key_columns[0] if len(key_columns) == 1 else f"({', '.join(key_columns)})"
+            con.execute(
+                f"DELETE FROM f1.raw.{table} WHERE {key_expr} IN ({placeholders})",
+                key_values,
+            )
+
     if not records:
         return 0
 
@@ -46,14 +63,6 @@ def load_table(con, tmp_path, records, table, key_columns, key_values):
         f"CREATE TABLE IF NOT EXISTS f1.raw.{table} AS "
         f"SELECT * FROM read_json_auto('{tmp_path}') WHERE false"
     )
-
-    if key_values:
-        placeholders = ", ".join("?" for _ in key_values)
-        key_expr = key_columns[0] if len(key_columns) == 1 else f"({', '.join(key_columns)})"
-        con.execute(
-            f"DELETE FROM f1.raw.{table} WHERE {key_expr} IN ({placeholders})",
-            key_values,
-        )
 
     con.execute(f"INSERT INTO f1.raw.{table} SELECT * FROM read_json_auto('{tmp_path}')")
     return len(records)

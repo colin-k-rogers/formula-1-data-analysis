@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+// Kept byte-for-byte identical to .dive-preview/src/dive.tsx (the local
+// preview copy) — mirror any change there too.
+import { useEffect, useRef, useState } from "react";
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
 import {
   LineChart,
@@ -153,12 +155,28 @@ function RaceDetail() {
 
   const [selectedDrivers, setSelectedDrivers] = useDiveState<string[]>("drivers", []);
 
+  // driversQ.data keeps showing the *previous* session's rows for a render or
+  // two after effectiveSessionKey changes (the query hasn't re-fetched yet),
+  // so gate on the data array reference actually changing rather than on
+  // effectiveSessionKey/length alone — otherwise this reseeds from stale data
+  // and then never corrects itself once the real rows for the new session
+  // arrive with the same driver count.
+  const seededSessionKeyRef = useRef<number | null>(null);
+  const prevDriversDataRef = useRef(driversQ.data);
   useEffect(() => {
-    if (selectedDrivers.length === 0 && raceDrivers.length > 0) {
+    const dataChanged = driversQ.data !== prevDriversDataRef.current;
+    prevDriversDataRef.current = driversQ.data;
+    if (
+      dataChanged &&
+      driversQ.isSuccess &&
+      raceDrivers.length > 0 &&
+      seededSessionKeyRef.current !== effectiveSessionKey
+    ) {
+      seededSessionKeyRef.current = effectiveSessionKey;
       setSelectedDrivers(raceDrivers.slice(0, 5).map((d) => String(d.driver_acronym)));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveSessionKey, raceDrivers.length]);
+  }, [driversQ.data, driversQ.isSuccess, effectiveSessionKey]);
 
   const lapsQ = useSQLQuery(
     `
