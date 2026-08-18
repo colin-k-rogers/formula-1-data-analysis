@@ -1,4 +1,4 @@
-# formula-1-data-analysis
+# f1 data analysis with Motherduck's Flights & Dives
 
 ## Purpose
 Explore the capabilities of Motherduck's flights and dives tooling as well as indulge my interest in F1!
