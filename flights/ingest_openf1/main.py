@@ -14,23 +14,38 @@ import requests
 BASE_URL = "https://api.openf1.org/v1"
 REQUEST_TIMEOUT_SEC = 30
 MAX_RETRIES = 3
+MAX_RATE_LIMIT_RETRIES = 6
 RETRY_BACKOFF_SEC = 2
-INTER_REQUEST_SLEEP_SEC = 0.2
+RATE_LIMIT_BACKOFF_SEC = 5
+INTER_REQUEST_SLEEP_SEC = 0.5
 
 
 def fetch(endpoint, params):
+    """GET with retries. 429s get their own longer, more patient backoff
+    budget (honoring Retry-After when OpenF1 sends it) since they reflect
+    rate limiting rather than a transient failure."""
     url = f"{BASE_URL}/{endpoint}"
     last_err = None
-    for attempt in range(MAX_RETRIES):
+    retries_used = 0
+    rate_limit_retries_used = 0
+    while retries_used < MAX_RETRIES and rate_limit_retries_used < MAX_RATE_LIMIT_RETRIES:
         try:
             resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SEC)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as err:
             last_err = err
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
-    raise RuntimeError(f"GET {url} params={params} failed after {MAX_RETRIES} attempts") from last_err
+            status = err.response.status_code if err.response is not None else None
+            if status == 429:
+                retry_after = err.response.headers.get("Retry-After")
+                sleep_sec = float(retry_after) if retry_after else RATE_LIMIT_BACKOFF_SEC * (2 ** rate_limit_retries_used)
+                rate_limit_retries_used += 1
+            else:
+                retries_used += 1
+                sleep_sec = RETRY_BACKOFF_SEC * retries_used
+            time.sleep(sleep_sec)
+    total_attempts = 1 + retries_used + rate_limit_retries_used
+    raise RuntimeError(f"GET {url} params={params} failed after {total_attempts} attempts") from last_err
 
 
 def load_table(con, tmp_path, records, table, key_columns, key_values):
