@@ -113,6 +113,7 @@ def send_email(subject, html, chart_png, recipient):
 def main():
     recipient = os.environ.get("RECIPIENT_EMAIL", "colin@motherduck.com")
     con = duckdb.connect("md:")
+    con.execute("SET TimeZone = 'UTC';")
 
     sessions = con.execute(
         f"""
