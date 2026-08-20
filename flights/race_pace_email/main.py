@@ -5,8 +5,10 @@ Pace dive (fct_lap_pace) for the most recent Race session: race header,
 driver-level avg lap time / cumulative gap-to-fastest summary table, and a
 lap-by-lap gap-to-fastest chart for the field's top 5 drivers by pace.
 
-Requires a MotherDuck Flight secret named `gmail_smtp` (params SMTP_USERNAME,
-SMTP_PASSWORD — a Gmail address and app password) attached to this Flight.
+Requires two MotherDuck Flight secrets attached to this Flight:
+- `gmail_smtp` (params SMTP_USERNAME, SMTP_PASSWORD — a Gmail address and app
+  password)
+- `email_recipient` (param RECIPIENT_EMAIL — the address summaries are sent to)
 """
 import io
 import os
@@ -111,7 +113,7 @@ def send_email(subject, html, chart_png, recipient):
 
 
 def main():
-    recipient = os.environ.get("RECIPIENT_EMAIL", "colin@motherduck.com")
+    recipient = os.environ["email_recipient_RECIPIENT_EMAIL"]
     con = duckdb.connect("md:")
     con.execute("SET TimeZone = 'UTC';")
 
