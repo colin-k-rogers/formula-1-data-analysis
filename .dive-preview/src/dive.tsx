@@ -31,11 +31,11 @@ export default function SeasonPaceDive() {
   return (
     <div className="p-6" style={{ background: "#f8f8f8", maxWidth: 900, margin: "0 auto" }}>
       <h1 className="text-2xl font-semibold" style={{ color: "#231f20" }}>
-        2025 Relative Lap Pace
+        Relative Lap Pace
       </h1>
       <p className="text-sm mb-6" style={{ color: "#6a6a6a" }}>
         Each driver's lap time compared with the fastest lap turned by the field on that
-        same lap, across all 2025 Race sessions.
+        same lap, across all ingested Race sessions.
       </p>
 
       <div className="flex gap-2 mb-6">
