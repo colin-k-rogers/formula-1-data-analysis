@@ -35,3 +35,35 @@ models:
       - name: driver_number
         tests:
           - not_null
+
+  - name: dim_radio_topics
+    columns:
+      - name: topic_id
+        tests:
+          - unique
+          - not_null
+
+  - name: fct_radio_messages
+    columns:
+      - name: radio_message_id
+        tests:
+          - unique
+          - not_null
+      - name: session_key
+        tests:
+          - not_null
+      - name: driver_number
+        tests:
+          - not_null
+
+  - name: fct_driver_topic_race
+    columns:
+      - name: session_key
+        tests:
+          - not_null
+      - name: driver_number
+        tests:
+          - not_null
+      - name: topic_id
+        tests:
+          - not_null
