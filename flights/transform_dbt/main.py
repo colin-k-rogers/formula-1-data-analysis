@@ -13,6 +13,7 @@ import urllib.request
 
 GITHUB_REPO = "colin-k-rogers/formula-1-data-analysis"
 GITHUB_REF = os.environ.get("GITHUB_REF", "main")
+FETCH_TIMEOUT_SEC = 30
 
 PROJECT_DIR = pathlib.Path("/tmp/dbt_project")
 
@@ -21,7 +22,7 @@ SKIP_DIRS = {"target", "dbt_packages", "logs"}
 
 def fetch_dbt_project():
     url = f"https://codeload.github.com/{GITHUB_REPO}/tar.gz/{GITHUB_REF}"
-    with urllib.request.urlopen(url) as resp:
+    with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT_SEC) as resp:
         archive = resp.read()
 
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
