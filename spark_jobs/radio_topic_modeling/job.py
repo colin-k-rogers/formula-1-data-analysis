@@ -156,15 +156,25 @@ def fit_topics(transcripts_pdf):
     # calculate_probabilities=True costs more compute, but a season's worth
     # of radio clips is small (hundreds, not millions) and skipping it risks
     # an all-null topic_probability column that Spark would infer as
-    # NullType — a type Iceberg can't reliably persist.
+    # NullType — a type Iceberg can't reliably persist. With it on,
+    # fit_transform's docs say probabilities covers "all topics across all
+    # documents" (2D), but empirically it still comes back 1D (already just
+    # the assigned topic's probability) when clustering collapses to very
+    # few topics — so handle both shapes rather than assuming one.
     embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     topic_model = BERTopic(embedding_model=embedding_model, calculate_probabilities=True)
     topics, probabilities = topic_model.fit_transform(docs_df["transcript_text"].tolist())
+    if probabilities is None:
+        topic_probability = None
+    elif probabilities.ndim == 2:
+        topic_probability = probabilities.max(axis=1)
+    else:
+        topic_probability = probabilities
 
     assignments = pd.DataFrame({
         "radio_message_id": docs_df["radio_message_id"],
         "topic_id": topics,
-        "topic_probability": probabilities,
+        "topic_probability": topic_probability,
     })
 
     topic_info = topic_model.get_topic_info()  # columns: Topic, Count, Name, Representation, ...
