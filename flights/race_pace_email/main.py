@@ -1,6 +1,6 @@
-"""MotherDuck Flight: email a Race Pace Summary for the most recent 2025 F1 race.
+"""MotherDuck Flight: email a Race Pace Summary for the most recent F1 race.
 
-On-demand flight. Reproduces the "Race detail" view of the 2025 Relative Lap
+On-demand flight. Reproduces the "Race detail" view of the Relative Lap
 Pace dive (fct_lap_pace) for the most recent Race session: race header,
 driver-level avg lap time / cumulative gap-to-fastest summary table, and a
 lap-by-lap gap-to-fastest chart for the field's top 5 drivers by pace.
