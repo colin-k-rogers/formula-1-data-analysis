@@ -22,9 +22,12 @@ topics as (
     select * from {{ ref('dim_radio_topics') }}
 ),
 
+-- Carries every column of `messages` through (not just the join key) so the
+-- final select doesn't need to join back to `messages` a second time just
+-- to re-fetch the columns it already has here.
 message_laps as (
     select
-        m.radio_message_id,
+        m.*,
         l.lap_number,
         row_number() over (
             partition by m.radio_message_id
@@ -35,6 +38,7 @@ message_laps as (
         on m.session_key = l.session_key
         and m.driver_number = l.driver_number
         and l.date_start <= m.message_date
+    qualify rn = 1
 )
 
 select
@@ -50,7 +54,7 @@ select
     d.name_acronym as driver_acronym,
     d.team_name,
     d.team_colour,
-    ml.lap_number,
+    m.lap_number,
     m.message_date,
     m.transcript_text,
     m.language,
@@ -58,9 +62,7 @@ select
     m.topic_id,
     coalesce(t.topic_label, 'Uncategorized') as topic_label,
     t.top_keywords as topic_keywords
-from messages m
-left join message_laps ml
-    on m.radio_message_id = ml.radio_message_id and ml.rn = 1
+from message_laps m
 left join sessions se on m.session_key = se.session_key
 left join drivers d on m.driver_number = d.driver_number
 left join topics t on m.topic_id = t.topic_id

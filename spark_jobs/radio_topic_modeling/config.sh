@@ -14,7 +14,7 @@ export EMR_RELEASE="emr-7.5.0"
 export CATALOG_NAME="radio"       # matches ICEBERG_CATALOG_NAME in job.py
 export ICEBERG_NAMESPACE="raw"    # matches ICEBERG_NAMESPACE in job.py —
                                    # this becomes the Glue database name
-export SEASON_YEAR="2025"
+export SEASON_YEAR="2026"
 
 export MODEL_STORE_PATH="s3://${BUCKET_NAME}/models/bertopic/model.tar.gz"
 export IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO_NAME}:${IMAGE_TAG}"

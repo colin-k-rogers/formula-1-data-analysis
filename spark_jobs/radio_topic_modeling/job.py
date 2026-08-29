@@ -30,6 +30,7 @@ commit each), not DELETE-then-INSERT or DROP-then-CREATE as separate
 statements, so a crash mid-run can't leave the table missing rows it already
 had, or missing entirely.
 """
+import hashlib
 import io
 import os
 import tarfile
@@ -75,7 +76,10 @@ REPROCESS_SESSIONS = {
 
 
 def fetch(endpoint, params):
-    """GET with retries; mirrors flights/ingest_openf1/main.py's fetch()."""
+    """GET with retries; mirrors flights/ingest_openf1/main.py's fetch(). A
+    404 means OpenF1 has no rows for these params (e.g. team radio for a
+    session that never happened) — treat that as an empty result rather
+    than an error to retry into the ground."""
     url = f"{BASE_URL}/{endpoint}"
     last_err = None
     retries_used = 0
@@ -83,6 +87,8 @@ def fetch(endpoint, params):
     while retries_used < MAX_RETRIES and rate_limit_retries_used < MAX_RATE_LIMIT_RETRIES:
         try:
             resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SEC)
+            if resp.status_code == 404:
+                return []
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as err:
@@ -103,9 +109,14 @@ def fetch(endpoint, params):
 def fetch_race_sessions(season_year):
     """All Race sessions for `season_year` (metadata only — cheap, and safe
     to call every run since it's just used to discover which sessions
-    exist, not to fetch their radio)."""
+    exist, not to fetch their radio). Cancelled races have no radio data at
+    all (same reason ingest_openf1 skips them for laps), so skip them too."""
     all_race_type_sessions = fetch("sessions", {"year": season_year, "session_type": "Race"})
-    return [s for s in all_race_type_sessions if s.get("session_name") == "Race"]
+    return [
+        s
+        for s in all_race_type_sessions
+        if s.get("session_name") == "Race" and not s.get("is_cancelled")
+    ]
 
 
 def fetch_team_radio_for_sessions(sessions):
@@ -186,7 +197,11 @@ def transcribe_partition(rows):
 
 
 def _split_s3_uri(uri):
-    bucket, _, key = uri[len("s3://"):].partition("/")
+    # Split on the scheme separator rather than assuming "s3://" specifically
+    # — EMR/Spark configs commonly write S3 paths as "s3a://" instead, which
+    # a fixed-length prefix strip would parse into a garbage bucket/key.
+    _, _, rest = uri.partition("://")
+    bucket, _, key = rest.partition("/")
     return bucket, key
 
 
@@ -322,7 +337,7 @@ def update_topic_assignments(spark, assignments_df, messages_table):
 
 
 def main():
-    season_year = os.environ.get("SEASON_YEAR", "2025")
+    season_year = os.environ.get("SEASON_YEAR", "2026")
 
     spark = SparkSession.builder.appName("f1-radio-topic-modeling").getOrCreate()
 
@@ -330,11 +345,17 @@ def main():
     topics_table = f"{CATALOG_NAME}.{ICEBERG_NAMESPACE}.radio_topics"
     table_existed_before_this_run = spark.catalog.tableExists(messages_table)
 
+    # Only count a session as done once it has at least one *successful*
+    # transcription — if every clip in a session failed (a transient
+    # network blip, say), leave it eligible for a natural retry next run
+    # instead of silently writing it off forever.
     already_processed = set()
     if table_existed_before_this_run:
         already_processed = {
             row["session_key"]
-            for row in spark.sql(f"SELECT DISTINCT session_key FROM {messages_table}").collect()
+            for row in spark.sql(
+                f"SELECT DISTINCT session_key FROM {messages_table} WHERE transcript_text IS NOT NULL"
+            ).collect()
         }
 
     all_sessions = fetch_race_sessions(season_year)
@@ -356,7 +377,12 @@ def main():
         return
 
     for m in radio_metadata:
-        m["radio_message_id"] = f"{m['session_key']}:{m['driver_number']}:{m['date']}"
+        # session_key:driver_number:date is descriptive but not guaranteed
+        # unique on its own — two radio calls could share a timestamp at
+        # OpenF1's reported precision. recording_url is guaranteed unique
+        # (each clip is a distinct file), so fold a short hash of it in too.
+        url_hash = hashlib.sha1(m["recording_url"].encode()).hexdigest()[:8]
+        m["radio_message_id"] = f"{m['session_key']}:{m['driver_number']}:{m['date']}:{url_hash}"
         # OpenF1 dates are ISO 8601 strings; Spark's TimestampType schema
         # needs actual datetime objects, not strings, to convert cleanly.
         m["message_date"] = datetime.fromisoformat(m.pop("date").replace("Z", "+00:00"))
@@ -381,11 +407,23 @@ def main():
     n_new_messages = new_rows_df.count()
 
     # Land this run's transcripts first (topic assignment filled in below).
-    # For FORCE_REFIT this also makes them visible to the "read the whole
+    # For a fresh fit this also makes them visible to the "read the whole
     # corpus back" query that follows.
     write_new_messages(spark, new_rows_df, messages_table)
 
-    if FORCE_REFIT:
+    from sentence_transformers import SentenceTransformer
+    embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    topic_model = None if FORCE_REFIT else load_persisted_topic_model(embedding_model)
+
+    # Fitting fresh — whether from a deliberate FORCE_REFIT, no
+    # MODEL_STORE_PATH configured, or nothing persisted yet — needs the
+    # WHOLE corpus, not just this run's new rows, or radio_topics getting
+    # wholesale-replaced below would strand every previously-assigned
+    # message's topic_id with no matching row (shown as "Uncategorized").
+    # Only a successfully loaded persisted model gets just this run's new
+    # rows, since transform() assigns them into its existing topic space
+    # without needing to see the rest of the corpus again.
+    if topic_model is None:
         docs_pdf = spark.sql(
             f"SELECT radio_message_id, transcript_text FROM {messages_table} WHERE transcript_text IS NOT NULL"
         ).toPandas()
@@ -395,10 +433,6 @@ def main():
     if docs_pdf.empty:
         print(f"season={season_year} sessions_processed={len(sessions_to_process)} messages={n_new_messages} — no successful transcriptions to topic-model.")
         return
-
-    from sentence_transformers import SentenceTransformer
-    embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    topic_model = None if FORCE_REFIT else load_persisted_topic_model(embedding_model)
 
     topics_df = None
     if topic_model is None:

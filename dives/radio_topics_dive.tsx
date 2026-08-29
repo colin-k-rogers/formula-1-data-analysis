@@ -34,11 +34,11 @@ export default function RadioTopicsDive() {
   return (
     <div className="p-6" style={{ background: "#f8f8f8", maxWidth: 960, margin: "0 auto" }}>
       <h1 className="text-2xl font-semibold" style={{ color: "#231f20" }}>
-        2025 Team Radio Topics
+        Team Radio Topics
       </h1>
       <p className="text-sm mb-6" style={{ color: "#6a6a6a" }}>
         What drivers and teams talk about on team radio, transcribed with Whisper and
-        topic-modeled with BERTopic, tracked across the 2025 season.
+        topic-modeled with BERTopic, tracked across the season.
       </p>
 
       <div className="flex gap-2 mb-6">
@@ -80,8 +80,18 @@ function SeasonTopicsEvolution() {
   `);
   const entities = Array.isArray(entitiesQ.data) ? entitiesQ.data : [];
 
+  // useDiveState persists to a URL fragment, so `entity` can come from a
+  // shared/crafted link rather than the <select> below — only ever trust a
+  // value that's actually one of this query's own results before it goes
+  // into SQL, instead of interpolating whatever the URL says verbatim.
   const [entity, setEntity] = useDiveState<string | null>("entity", null);
-  const effectiveEntity = entity ?? (entities.length ? String(entities[0].entity) : null);
+  const knownEntities = new Set(entities.map((row) => String(row.entity)));
+  const effectiveEntity =
+    entity != null && knownEntities.has(entity)
+      ? entity
+      : entities.length
+        ? String(entities[0].entity)
+        : null;
 
   const rowsQ = useSQLQuery(
     `
@@ -220,19 +230,6 @@ function RaceTopicsDetail() {
   const effectiveSessionKey =
     sessionKey ?? (sessions.length ? N(sessions[sessions.length - 1].session_key) : null);
 
-  const breakdownQ = useSQLQuery(
-    `
-      select topic_label, sum(message_count) as message_count
-      from ${FCT_DRIVER_TOPIC_RACE}
-      where session_key = ${effectiveSessionKey}
-      group by 1
-      order by message_count desc
-    `,
-    { enabled: effectiveSessionKey != null },
-  );
-  const breakdownRows = Array.isArray(breakdownQ.data) ? breakdownQ.data : [];
-  const totalMessages = breakdownRows.reduce((sum, r) => sum + N(r.message_count), 0);
-
   const messagesQ = useSQLQuery(
     `
       select driver_acronym, team_colour, lap_number, message_date, topic_label, transcript_text
@@ -243,6 +240,22 @@ function RaceTopicsDetail() {
     { enabled: effectiveSessionKey != null },
   );
   const messageRows = Array.isArray(messagesQ.data) ? messagesQ.data : [];
+
+  // The topic breakdown is just a tally over messageRows — every message
+  // already carries its topic_label — so derive it client-side instead of
+  // firing a second query for the same session that duplicates work the
+  // browser can do for free from data it already fetched.
+  const breakdownRows = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of messageRows) {
+      const topic = String(r.topic_label);
+      counts.set(topic, (counts.get(topic) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([topic_label, message_count]) => ({ topic_label, message_count }))
+      .sort((a, b) => b.message_count - a.message_count);
+  }, [messageRows]);
+  const totalMessages = breakdownRows.reduce((sum, r) => sum + r.message_count, 0);
 
   return (
     <div>
@@ -268,13 +281,13 @@ function RaceTopicsDetail() {
       <h2 className="text-sm font-semibold mb-2" style={{ color: "#231f20" }}>
         Topic breakdown
       </h2>
-      {breakdownQ.isLoading ? (
+      {messagesQ.isLoading ? (
         <div className="animate-pulse space-y-2">
           <div className="h-4 bg-gray-200 rounded w-3/4" />
           <div className="h-4 bg-gray-200 rounded w-1/2" />
         </div>
-      ) : breakdownQ.isError ? (
-        <p style={{ color: "#bc1200" }}>Failed to load: {breakdownQ.error?.message}</p>
+      ) : messagesQ.isError ? (
+        <p style={{ color: "#bc1200" }}>Failed to load: {messagesQ.error?.message}</p>
       ) : (
         <table className="w-full text-sm mb-6" style={{ borderCollapse: "collapse" }}>
           <thead>
