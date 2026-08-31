@@ -7,6 +7,9 @@
 # environment before calling this script to opt into those, e.g.:
 #   FORCE_REFIT=true ./run.sh
 set -euo pipefail
+# Without this, the AWS CLI pipes any command's output through `less` when
+# run in a terminal, which blocks waiting for you to press `q`.
+export AWS_PAGER=""
 cd "$(dirname "${BASH_SOURCE[0]}")"
 if [ ! -f ./.env ]; then
     echo "Missing .env — copy the template and edit it first: cp .env.example .env" >&2

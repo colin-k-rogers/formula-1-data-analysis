@@ -12,6 +12,10 @@
 # It writes the resource ids it finds/creates to state.sh (git-ignored),
 # which run.sh reads.
 set -euo pipefail
+# Without this, the AWS CLI pipes any command's output through `less` when
+# run in a terminal, which blocks waiting for you to press `q` on every
+# single `aws` call below that doesn't already redirect its output.
+export AWS_PAGER=""
 cd "$(dirname "${BASH_SOURCE[0]}")"
 if [ ! -f ./.env ]; then
     echo "Missing .env — copy the template and edit it first: cp .env.example .env" >&2
@@ -166,6 +170,10 @@ else
     echo "Created ECR repo: $REPO_NAME"
 fi
 
+# ECR repository (resource) policies reject a "Resource" element outright
+# ("InvalidParameterException: Invalid repository policy provided") — it's
+# implicit from which repository the policy is attached to, unlike an IAM
+# identity policy where you'd need one.
 cat > /tmp/emrs-ecr-policy.json <<EOF
 {
   "Version": "2012-10-17",
@@ -174,7 +182,6 @@ cat > /tmp/emrs-ecr-policy.json <<EOF
     "Effect": "Allow",
     "Principal": {"Service": "emr-serverless.amazonaws.com"},
     "Action": ["ecr:BatchGetImage", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer"],
-    "Resource": "arn:aws:ecr:${REGION}:${ACCOUNT_ID}:repository/${REPO_NAME}",
     "Condition": {"ArnLike": {"aws:SourceArn": "arn:aws:emr-serverless:${REGION}:${ACCOUNT_ID}:/applications/*"}}
   }]
 }
