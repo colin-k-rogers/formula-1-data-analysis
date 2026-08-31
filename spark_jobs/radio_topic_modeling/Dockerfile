@@ -11,6 +11,11 @@ FROM public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 
 USER root
 
+# hdbscan (a BERTopic dependency) compiles a C extension at install time and
+# needs Python.h to do it — EMR's base image (Amazon Linux 2023, dnf) has
+# gcc but not the Python dev headers by default.
+RUN dnf install -y python3-devel gcc-c++ make && dnf clean all
+
 RUN python3 -m venv /opt/venv
 COPY requirements.txt /opt/radio_topic_modeling/requirements.txt
 RUN /opt/venv/bin/pip install --no-cache-dir -r /opt/radio_topic_modeling/requirements.txt
