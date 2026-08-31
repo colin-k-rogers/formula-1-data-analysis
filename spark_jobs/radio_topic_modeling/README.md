@@ -22,6 +22,11 @@ either script below (`.env` itself is git-ignored, same as any other
 --region <REGION>` for the current EMR release — `emr-7.5.0` in there may
 not be the latest by the time you read this.
 
+If you use named AWS CLI profiles, uncomment `AWS_PROFILE` in `.env` — both
+scripts `source` the file with `set -a`, which exports every variable it
+sets, so the `aws`/`docker login` calls in `setup.sh` and `run.sh` pick it
+up automatically without needing a `--profile` flag anywhere.
+
 ## One-time AWS setup (from scratch)
 
 ```bash
