@@ -11,11 +11,16 @@ weights, which don't fit a lightweight Flight. It runs as an
 [AWS EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/)
 job run, submitted on demand via the AWS CLI (not on a MotherDuck schedule).
 
-Every value in [config.sh](config.sh) is a placeholder — edit that file
-with your own account id, bucket name, and region before running either
-script below. Check `aws emr-serverless list-release-labels --region
-<REGION>` for the current EMR release — `emr-7.5.0` in there may not be the
-latest by the time you read this.
+```bash
+cp .env.example .env
+```
+
+Every value in [.env.example](.env.example) is a placeholder — edit your
+copy with your own account id, bucket name, and region before running
+either script below (`.env` itself is git-ignored, same as any other
+`.env` in this repo). Check `aws emr-serverless list-release-labels
+--region <REGION>` for the current EMR release — `emr-7.5.0` in there may
+not be the latest by the time you read this.
 
 ## One-time AWS setup (from scratch)
 
@@ -33,9 +38,13 @@ gets you that without paying for a NAT Gateway; the IAM job runtime role
 and the repository policy that lets EMR Serverless pull it; and finally the
 EMR Serverless application itself, wired to that VPC and image.
 
-It writes the resource ids it creates (`VPC_ID`, `SUBNET_ID`, `SG_ID`,
-`APP_ID`) to `state.sh`, which is git-ignored and which `run.sh` reads —
-re-run `setup.sh` if you ever need to recreate them from scratch.
+It's safe to re-run: every resource is looked up by a fixed name/tag first
+and only created if missing (the EMR Serverless application's image/network
+config is updated in place instead — the point of rerunning after pushing a
+new image). The one exception is the IAM policy's content, which isn't
+diffed and updated on rerun — see the comment in `setup.sh`. It writes the
+resource ids it finds/creates (`VPC_ID`, `SUBNET_ID`, `SG_ID`, `APP_ID`) to
+`state.sh`, which is git-ignored and which `run.sh` reads.
 
 ## Running the job
 

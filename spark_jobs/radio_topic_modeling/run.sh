@@ -8,8 +8,21 @@
 #   FORCE_REFIT=true ./run.sh
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
-source ./config.sh
+if [ ! -f ./.env ]; then
+    echo "Missing .env — copy the template and edit it first: cp .env.example .env" >&2
+    exit 1
+fi
+if [ ! -f ./state.sh ]; then
+    echo "Missing state.sh — run ./setup.sh first." >&2
+    exit 1
+fi
+set -a
+source ./.env
+set +a
 source ./state.sh   # written by setup.sh: APP_ID, VPC_ID, SUBNET_ID, SG_ID
+
+MODEL_STORE_PATH="s3://${BUCKET_NAME}/models/bertopic/model.tar.gz"
+ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/f1-radio-topics-emrs-role"
 
 EXTRA_CONF=""
 if [ -n "${FORCE_REFIT:-}" ]; then
