@@ -9,11 +9,12 @@
 # Reuses ../spark_jobs/radio_topic_modeling/.env for ACCOUNT_ID/BUCKET_NAME
 # -- run that Flight's setup.sh first if you haven't.
 #
-# Safe to re-run: the user/policy are found-or-created by name, same as
-# spark_jobs/radio_topic_modeling/setup.sh. The access key is the one
-# exception -- IAM only ever shows you its secret at creation time, so
-# this skips creating a second one if the user already has one (also
-# because an IAM user can hold at most 2 access keys at a time).
+# Safe to re-run: the user is found-or-created by name, and the policy's
+# permissions are kept in sync (as a new policy version) if you change them
+# below and re-run. The access key is the one exception -- IAM only ever
+# shows you its secret at creation time, so this skips creating a second
+# one if the user already has one (also because an IAM user can hold at
+# most 2 access keys at a time).
 #
 # Run this once:
 #   ./setup_iam_user.sh
@@ -44,6 +45,12 @@ fi
 # Read-only and narrower than the EMR job's own execution role (no
 # Create/Update/Delete/BatchCreate) -- MotherDuck only ever reads through
 # this, matching setup_radio_lakehouse.sql's READ_ONLY true.
+#
+# glue:GetCatalog/GetCatalogs is required specifically for the Iceberg REST
+# catalog's GET /iceberg/v1/config endpoint (the very first call MotherDuck
+# makes when attaching the database) -- the table/database/partition-level
+# Get* actions alone 403 there even though they're all that's needed once
+# past that point.
 cat > /tmp/motherduck-reader-policy.json <<EOF
 {
   "Version": "2012-10-17",
@@ -52,6 +59,7 @@ cat > /tmp/motherduck-reader-policy.json <<EOF
       "Sid": "GlueReadOnly",
       "Effect": "Allow",
       "Action": [
+        "glue:GetCatalog", "glue:GetCatalogs",
         "glue:GetDatabase", "glue:GetDatabases",
         "glue:GetTable", "glue:GetTables",
         "glue:GetPartition", "glue:GetPartitions"
@@ -68,7 +76,18 @@ cat > /tmp/motherduck-reader-policy.json <<EOF
 }
 EOF
 if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
-    echo "IAM policy exists: $POLICY_ARN"
+    # IAM policies are versioned and can't be edited in place -- publish a
+    # new default version instead. A policy can hold at most 5 versions, so
+    # prune the oldest non-default one first if already at that cap.
+    VERSION_COUNT=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query 'length(Versions)' --output text)
+    if [ "$VERSION_COUNT" -ge 5 ]; then
+        OLDEST_VERSION=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" \
+            --query 'sort_by(Versions[?IsDefaultVersion==`false`], &CreateDate)[0].VersionId' --output text)
+        aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$OLDEST_VERSION"
+    fi
+    aws iam create-policy-version --policy-arn "$POLICY_ARN" \
+        --policy-document file:///tmp/motherduck-reader-policy.json --set-as-default >/dev/null
+    echo "Updated IAM policy: $POLICY_ARN"
 else
     aws iam create-policy --policy-name "$POLICY_NAME" \
         --policy-document file:///tmp/motherduck-reader-policy.json
