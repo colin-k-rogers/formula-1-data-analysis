@@ -29,6 +29,18 @@ IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO_NAME}:${IMAGE_TAG}"
 ROLE_NAME="f1-radio-topics-emrs-role"
 TAG_NAME="f1-radio-topics"
 
+# The image build and the EMR Serverless application must target the same
+# CPU architecture, or job runs fail at launch with "Custom image
+# architecture doesn't match application architecture."
+case "$ARCHITECTURE" in
+    arm64) DOCKER_PLATFORM="linux/arm64"; EMR_ARCHITECTURE="ARM64" ;;
+    x86_64) DOCKER_PLATFORM="linux/amd64"; EMR_ARCHITECTURE="X86_64" ;;
+    *)
+        echo "ARCHITECTURE must be 'arm64' or 'x86_64' in .env (got: '${ARCHITECTURE}')" >&2
+        exit 1
+        ;;
+esac
+
 # 1. S3 bucket — holds the Iceberg warehouse data, EMR Serverless logs, and
 #    the persisted BERTopic model (see run.sh's MODEL_STORE_PATH) — all
 #    under one bucket so the IAM policy in step 3 already covers all of it.
@@ -190,8 +202,10 @@ EOF
 aws ecr set-repository-policy --repository-name "$REPO_NAME" --policy-text file:///tmp/emrs-ecr-policy.json
 
 # Rebuilding/pushing the same tag just overwrites it — safe every time.
+# --platform is pinned explicitly (not left to whatever the build host's
+# native architecture happens to be) to match $EMR_ARCHITECTURE above.
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-docker build -t "$IMAGE" .
+docker build --platform "$DOCKER_PLATFORM" -t "$IMAGE" .
 docker push "$IMAGE"
 
 # 5. EMR Serverless application, wired to the VPC's public subnet and the
@@ -205,17 +219,30 @@ if [ -z "$APP_ID" ] || [ "$APP_ID" = "None" ]; then
         --name "$TAG_NAME" \
         --release-label "$EMR_RELEASE" \
         --type SPARK \
+        --architecture "$EMR_ARCHITECTURE" \
         --image-configuration "{\"imageUri\": \"${IMAGE}\"}" \
         --network-configuration "{\"subnetIds\": [\"${SUBNET_ID}\"], \"securityGroupIds\": [\"${SG_ID}\"]}" \
         --query 'applicationId' --output text)
-    echo "Created EMR Serverless application: $APP_ID"
+    echo "Created EMR Serverless application: $APP_ID ($EMR_ARCHITECTURE)"
 else
+    # Architecture is immutable once an application exists — don't attempt
+    # to "fix" a mismatch with update-application (unclear whether that
+    # would error or silently no-op); fail loudly instead so ARCHITECTURE
+    # drifting from what the app was created with doesn't ship an image
+    # that fails every job run with "Custom image architecture doesn't
+    # match application architecture."
+    EXISTING_ARCH=$(aws emr-serverless get-application --application-id "$APP_ID" --query 'application.architecture' --output text)
+    if [ "$EXISTING_ARCH" != "$EMR_ARCHITECTURE" ]; then
+        echo "ARCHITECTURE=${ARCHITECTURE} (${EMR_ARCHITECTURE}) doesn't match the existing application's architecture (${EXISTING_ARCH})." >&2
+        echo "Delete the application and re-run setup.sh, or fix ARCHITECTURE in .env to match: ${EXISTING_ARCH}" >&2
+        exit 1
+    fi
     aws emr-serverless update-application \
         --application-id "$APP_ID" \
         --image-configuration "{\"imageUri\": \"${IMAGE}\"}" \
         --network-configuration "{\"subnetIds\": [\"${SUBNET_ID}\"], \"securityGroupIds\": [\"${SG_ID}\"]}" \
         >/dev/null
-    echo "Updated EMR Serverless application: $APP_ID"
+    echo "Updated EMR Serverless application: $APP_ID ($EMR_ARCHITECTURE)"
 fi
 
 cat > ./state.sh <<EOF
