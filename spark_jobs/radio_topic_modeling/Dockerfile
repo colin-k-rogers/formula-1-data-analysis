@@ -16,21 +16,28 @@ USER root
 # gcc but not the Python dev headers by default.
 RUN dnf install -y python3-devel gcc-c++ make && dnf clean all
 
-RUN python3 -m venv /opt/venv
 COPY requirements.txt /opt/radio_topic_modeling/requirements.txt
-RUN /opt/venv/bin/pip install --no-cache-dir -r /opt/radio_topic_modeling/requirements.txt
+COPY job.py /opt/radio_topic_modeling/job.py
 
 # Pre-download model weights at build time so the job doesn't re-fetch them
 # at runtime — executors never need outbound internet this way; only the
 # driver does, to reach the OpenF1 API (see README.md's network setup).
 ARG WHISPER_MODEL_SIZE=base
 ARG EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
-RUN /opt/venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL_SIZE}', device='cpu', compute_type='int8')" \
-    && /opt/venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${EMBEDDING_MODEL_NAME}')"
 
-COPY job.py /opt/radio_topic_modeling/job.py
-
-RUN chown -R hadoop:hadoop /opt/radio_topic_modeling /opt/venv
+# Everything that touches /opt/venv (creating it, installing ~1.7GB of
+# packages, downloading model weights) happens in one RUN, ending with the
+# chown, on purpose: chowning a large directory in a *later*, separate
+# layer forces the overlay filesystem to copy up (duplicate) every file
+# just to record the ownership change — that alone was the difference
+# between this image measuring ~2.35GB fused into one layer like this vs.
+# splitting venv-creation/chown across layers, which put it right at
+# EMR Serverless's 10GB custom image size limit.
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir -r /opt/radio_topic_modeling/requirements.txt \
+    && /opt/venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL_SIZE}', device='cpu', compute_type='int8')" \
+    && /opt/venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${EMBEDDING_MODEL_NAME}')" \
+    && chown -R hadoop:hadoop /opt/radio_topic_modeling /opt/venv
 
 # Deliberately not setting PYSPARK_PYTHON via ENV here: EMR Serverless's
 # driver launcher doesn't reliably pick up a plain container ENV for it, so
