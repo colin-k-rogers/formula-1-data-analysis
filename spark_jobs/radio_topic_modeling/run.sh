@@ -19,9 +19,17 @@ if [ ! -f ./state.sh ]; then
     echo "Missing state.sh — run ./setup.sh first." >&2
     exit 1
 fi
+# Preserve a SEASON_YEAR passed on the command line (e.g.
+# `SEASON_YEAR=2024 ./run.sh`) -- .env also defines SEASON_YEAR as its
+# default, and sourcing it below would otherwise silently clobber the
+# caller's override.
+SEASON_YEAR_OVERRIDE="${SEASON_YEAR:-}"
 set -a
 source ./.env
 set +a
+if [ -n "$SEASON_YEAR_OVERRIDE" ]; then
+    SEASON_YEAR="$SEASON_YEAR_OVERRIDE"
+fi
 source ./state.sh   # written by setup.sh: APP_ID, VPC_ID, SUBNET_ID, SG_ID
 
 MODEL_STORE_PATH="s3://${BUCKET_NAME}/models/bertopic/model.tar.gz"
