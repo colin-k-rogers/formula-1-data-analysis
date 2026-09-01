@@ -9,3 +9,15 @@ sources:
       - name: sessions
       - name: drivers
       - name: laps
+
+  - name: radio
+    description: >
+      Populated by spark_jobs/radio_topic_modeling/job.py (Whisper transcription +
+      BERTopic topic modeling), written as Iceberg tables and attached into
+      MotherDuck via warehouse/setup_radio_lakehouse.sql. Not populated by any
+      Flight in this repo.
+    database: radio_lakehouse
+    schema: raw
+    tables:
+      - name: radio_messages
+      - name: radio_topics
