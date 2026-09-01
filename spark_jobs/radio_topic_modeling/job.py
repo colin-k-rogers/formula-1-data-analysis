@@ -182,7 +182,15 @@ def transcribe_partition(rows):
             resp = requests.get(d["recording_url"], timeout=REQUEST_TIMEOUT_SEC)
             resp.raise_for_status()
             audio_buf = io.BytesIO(resp.content)
-            segments, info = model.transcribe(audio_buf, beam_size=5)
+            # Force English rather than letting Whisper free-detect it: F1
+            # radio is overwhelmingly English, and on short/noisy/near-silent
+            # clips (routine for radio traffic) Whisper's language detector
+            # can lock onto a random language and hallucinate fluent-looking
+            # text in it — Welsh is a well-documented hallucination target
+            # for quiet/noisy audio specifically. A wrong-but-plausible
+            # transcript is worse for topic modeling than an English
+            # transcript that's merely poor.
+            segments, info = model.transcribe(audio_buf, beam_size=5, language="en")
             text = " ".join(seg.text.strip() for seg in segments).strip()
             d["transcript_text"] = text or None
             d["language"] = info.language
@@ -271,8 +279,35 @@ def fit_topics_fresh(docs_pdf, embedding_model):
     from MODEL_STORE_PATH yet) and for a deliberate FORCE_REFIT. Returns
     (assignments, topics, fitted_model)."""
     from bertopic import BERTopic
+    from bertopic.representation import KeyBERTInspired
+    from sklearn.feature_extraction.text import CountVectorizer
+    from umap import UMAP
 
-    topic_model = BERTopic(embedding_model=embedding_model, calculate_probabilities=True)
+    # Radio calls are short (a sentence or two) and there are only hundreds
+    # of them a season — BERTopic's defaults are tuned for larger,
+    # longer-form corpora and collapse data like this into one dominant
+    # cluster. A smaller UMAP neighborhood and lower min_topic_size let
+    # more, smaller topics actually form instead of one catch-all blob.
+    umap_model = UMAP(n_neighbors=10, n_components=5, min_dist=0.0, metric="cosine", random_state=42)
+    # Default c-TF-IDF keywords are plain word counts with no stopword
+    # filtering, so labels end up as "the, to, it, we" instead of actual
+    # racing vocabulary. Strip stopwords and allow 2-word phrases (e.g.
+    # "pit stop", "tyre wear") so labels carry real information.
+    vectorizer_model = CountVectorizer(stop_words="english", ngram_range=(1, 2), min_df=2)
+    # Re-ranks each topic's keywords by embedding similarity to the topic
+    # itself, reusing the same embedding_model already loaded (no extra
+    # model or network call) — meaningfully more readable than raw
+    # c-TF-IDF counts alone.
+    representation_model = KeyBERTInspired()
+
+    topic_model = BERTopic(
+        embedding_model=embedding_model,
+        umap_model=umap_model,
+        vectorizer_model=vectorizer_model,
+        representation_model=representation_model,
+        min_topic_size=8,
+        calculate_probabilities=True,
+    )
     topics, probabilities = topic_model.fit_transform(docs_pdf["transcript_text"].tolist())
     assignments = _assignments_frame(docs_pdf["radio_message_id"], topics, probabilities)
 
