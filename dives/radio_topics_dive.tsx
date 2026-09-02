@@ -36,6 +36,25 @@ function raceLabel(row: Record<string, unknown>): string {
   return `${String(row.circuit_short_name)} — ${String(row.session_date).slice(0, 10)}`;
 }
 
+// A specific year, the "all" sentinel (no year filter), or null while the
+// season list is still loading.
+type Season = number | "all" | null;
+
+/** SQL fragment restricting to a single season, or "" for "all"/null (no
+ * filter — every query here already validated `season` against the known
+ * season list or the "all" sentinel before it reaches SQL). */
+function seasonFilter(season: Season): string {
+  return season != null && season !== "all" ? `year = ${season}` : "";
+}
+
+/** Joins non-empty SQL conditions with `and`, prefixed with `where` — so
+ * callers can freely mix an optional season filter with other conditions
+ * without juggling `where`/`and` placement themselves. */
+function whereClause(...conditions: string[]): string {
+  const parts = conditions.filter(Boolean);
+  return parts.length ? `where ${parts.join(" and ")}` : "";
+}
+
 export default function RadioTopicsDive() {
   const [view, setView] = useDiveState<"season" | "race">("view", "season");
 
@@ -45,10 +64,13 @@ export default function RadioTopicsDive() {
   const seasons = (Array.isArray(seasonsQ.data) ? seasonsQ.data : []).map((r) => N(r.year));
 
   // Same URL-state-can't-be-trusted-verbatim rule as `entity`/`session`
-  // below: only accept a season that's actually one of this query's results.
-  const [season, setSeason] = useDiveState<number | null>("season_year", null);
-  const effectiveSeason =
-    season != null && seasons.includes(season) ? season : (seasons[0] ?? null);
+  // below: only accept a season that's actually one of this query's results
+  // (or the "all" sentinel, which is always valid).
+  const [season, setSeason] = useDiveState<Season>("season_year", null);
+  const effectiveSeason: Season =
+    season === "all" || (season != null && seasons.includes(season))
+      ? season
+      : (seasons[0] ?? null);
 
   return (
     <div className="p-6" style={{ background: "#f8f8f8", maxWidth: 960, margin: "0 auto" }}>
@@ -61,6 +83,17 @@ export default function RadioTopicsDive() {
       </p>
 
       <div className="flex gap-2 mb-4">
+        <button
+          onClick={() => setSeason("all")}
+          className="text-sm px-3 py-1 rounded"
+          style={{
+            background: effectiveSeason === "all" ? "#231f20" : "transparent",
+            color: effectiveSeason === "all" ? "#fff" : "#6a6a6a",
+            border: `1px solid ${effectiveSeason === "all" ? "#231f20" : "#ddd"}`,
+          }}
+        >
+          All
+        </button>
         {seasons.map((y) => (
           <button
             key={y}
@@ -109,7 +142,7 @@ export default function RadioTopicsDive() {
   );
 }
 
-function SeasonTopicsEvolution({ season }: { season: number | null }) {
+function SeasonTopicsEvolution({ season }: { season: Season }) {
   const [groupBy, setGroupBy] = useDiveState<"driver" | "team">("groupBy", "driver");
 
   const entitiesQ = useSQLQuery(
@@ -117,7 +150,7 @@ function SeasonTopicsEvolution({ season }: { season: number | null }) {
       select distinct
         ${groupBy === "driver" ? "driver_acronym as entity, team_colour as color" : "team_name as entity, team_colour as color"}
       from ${FCT_DRIVER_TOPIC_RACE}
-      where year = ${season}
+      ${whereClause(seasonFilter(season))}
       order by entity
     `,
     { enabled: season != null },
@@ -146,8 +179,10 @@ function SeasonTopicsEvolution({ season }: { season: number | null }) {
         topic_label,
         sum(message_count) as message_count
       from ${FCT_DRIVER_TOPIC_RACE}
-      where year = ${season}
-        and ${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'
+      ${whereClause(
+        seasonFilter(season),
+        `${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'`,
+      )}
       group by 1, 2, 3, 4
       order by session_date
     `,
@@ -263,12 +298,12 @@ function buildStackedSeries(rows: Record<string, unknown>[]) {
   return { chartData, topics };
 }
 
-function RaceTopicsDetail({ season }: { season: number | null }) {
+function RaceTopicsDetail({ season }: { season: Season }) {
   const sessionsQ = useSQLQuery(
     `
       select distinct session_key, circuit_short_name, session_date
       from ${FCT_DRIVER_TOPIC_RACE}
-      where year = ${season}
+      ${whereClause(seasonFilter(season))}
       order by session_date
     `,
     { enabled: season != null },
