@@ -394,57 +394,59 @@ def main():
         }
 
     all_sessions = fetch_race_sessions(season_year)
-    if not all_sessions:
-        print(f"No Race sessions found for season {season_year}; nothing to do.")
-        return
-
     sessions_to_process = [
         s for s in all_sessions
         if s["session_key"] not in already_processed or s["session_key"] in REPROCESS_SESSIONS
     ]
-    if not sessions_to_process:
-        print(f"season={season_year}: every session already processed, nothing new to transcribe.")
+    radio_metadata = fetch_team_radio_for_sessions(sessions_to_process) if sessions_to_process else []
+
+    # A run with nothing new to transcribe for this SEASON_YEAR still needs
+    # to reach the topic-modeling stage below when FORCE_REFIT is set —
+    # refitting is a deliberate action on the corpus that's already
+    # persisted, not something that depends on this run finding new
+    # sessions. Only bail out early when there's truly nothing to do at all.
+    new_rows_df = None
+    n_new_messages = 0
+    if radio_metadata:
+        for m in radio_metadata:
+            # session_key:driver_number:date is descriptive but not
+            # guaranteed unique on its own — two radio calls could share a
+            # timestamp at OpenF1's reported precision. recording_url is
+            # guaranteed unique (each clip is a distinct file), so fold a
+            # short hash of it in too.
+            url_hash = hashlib.sha1(m["recording_url"].encode()).hexdigest()[:8]
+            m["radio_message_id"] = f"{m['session_key']}:{m['driver_number']}:{m['date']}:{url_hash}"
+            # OpenF1 dates are ISO 8601 strings; Spark's TimestampType schema
+            # needs actual datetime objects, not strings, to convert cleanly.
+            m["message_date"] = datetime.fromisoformat(m.pop("date").replace("Z", "+00:00"))
+
+        metadata_rows = [
+            {k: m.get(k) for k in RADIO_METADATA_SCHEMA.fieldNames()} for m in radio_metadata
+        ]
+        metadata_df = spark.createDataFrame(metadata_rows, schema=RADIO_METADATA_SCHEMA)
+
+        # Repartition so each partition gets a manageable, roughly even batch
+        # of clips to download+transcribe; too many partitions wastes
+        # model-load time, too few serializes the run onto a handful of
+        # executors.
+        num_partitions = max(1, min(32, len(metadata_rows) // 10 or 1))
+        transcribed_rdd = metadata_df.repartition(num_partitions).rdd.mapPartitions(transcribe_partition)
+        transcripts_df = spark.createDataFrame(transcribed_rdd, schema=TRANSCRIPT_SCHEMA)
+        new_rows_df = (
+            transcripts_df
+            .withColumn("topic_id", F.lit(None).cast(IntegerType()))
+            .withColumn("topic_probability", F.lit(None).cast(DoubleType()))
+        )
+        new_rows_df.cache()
+        n_new_messages = new_rows_df.count()
+
+        # Land this run's transcripts first (topic assignment filled in
+        # below). For a fresh fit this also makes them visible to the "read
+        # the whole corpus back" query that follows.
+        write_new_messages(spark, new_rows_df, messages_table)
+    elif not FORCE_REFIT:
+        print(f"season={season_year}: nothing new to transcribe this run; nothing to do.")
         return
-
-    radio_metadata = fetch_team_radio_for_sessions(sessions_to_process)
-    if not radio_metadata:
-        print(f"season={season_year}: no team radio in the {len(sessions_to_process)} session(s) processed this run.")
-        return
-
-    for m in radio_metadata:
-        # session_key:driver_number:date is descriptive but not guaranteed
-        # unique on its own — two radio calls could share a timestamp at
-        # OpenF1's reported precision. recording_url is guaranteed unique
-        # (each clip is a distinct file), so fold a short hash of it in too.
-        url_hash = hashlib.sha1(m["recording_url"].encode()).hexdigest()[:8]
-        m["radio_message_id"] = f"{m['session_key']}:{m['driver_number']}:{m['date']}:{url_hash}"
-        # OpenF1 dates are ISO 8601 strings; Spark's TimestampType schema
-        # needs actual datetime objects, not strings, to convert cleanly.
-        m["message_date"] = datetime.fromisoformat(m.pop("date").replace("Z", "+00:00"))
-
-    metadata_rows = [
-        {k: m.get(k) for k in RADIO_METADATA_SCHEMA.fieldNames()} for m in radio_metadata
-    ]
-    metadata_df = spark.createDataFrame(metadata_rows, schema=RADIO_METADATA_SCHEMA)
-
-    # Repartition so each partition gets a manageable, roughly even batch of
-    # clips to download+transcribe; too many partitions wastes model-load
-    # time, too few serializes the run onto a handful of executors.
-    num_partitions = max(1, min(32, len(metadata_rows) // 10 or 1))
-    transcribed_rdd = metadata_df.repartition(num_partitions).rdd.mapPartitions(transcribe_partition)
-    transcripts_df = spark.createDataFrame(transcribed_rdd, schema=TRANSCRIPT_SCHEMA)
-    new_rows_df = (
-        transcripts_df
-        .withColumn("topic_id", F.lit(None).cast(IntegerType()))
-        .withColumn("topic_probability", F.lit(None).cast(DoubleType()))
-    )
-    new_rows_df.cache()
-    n_new_messages = new_rows_df.count()
-
-    # Land this run's transcripts first (topic assignment filled in below).
-    # For a fresh fit this also makes them visible to the "read the whole
-    # corpus back" query that follows.
-    write_new_messages(spark, new_rows_df, messages_table)
 
     from sentence_transformers import SentenceTransformer
     embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
