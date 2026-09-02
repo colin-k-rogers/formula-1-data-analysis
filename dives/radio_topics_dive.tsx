@@ -39,6 +39,17 @@ function raceLabel(row: Record<string, unknown>): string {
 export default function RadioTopicsDive() {
   const [view, setView] = useDiveState<"season" | "race">("view", "season");
 
+  const seasonsQ = useSQLQuery(`
+    select distinct year from ${FCT_DRIVER_TOPIC_RACE} order by year desc
+  `);
+  const seasons = (Array.isArray(seasonsQ.data) ? seasonsQ.data : []).map((r) => N(r.year));
+
+  // Same URL-state-can't-be-trusted-verbatim rule as `entity`/`session`
+  // below: only accept a season that's actually one of this query's results.
+  const [season, setSeason] = useDiveState<number | null>("season_year", null);
+  const effectiveSeason =
+    season != null && seasons.includes(season) ? season : (seasons[0] ?? null);
+
   return (
     <div className="p-6" style={{ background: "#f8f8f8", maxWidth: 960, margin: "0 auto" }}>
       <h1 className="text-2xl font-semibold" style={{ color: "#231f20" }}>
@@ -48,6 +59,23 @@ export default function RadioTopicsDive() {
         What drivers and teams talk about on team radio, transcribed with Whisper and
         topic-modeled with BERTopic, tracked across the season.
       </p>
+
+      <div className="flex gap-2 mb-4">
+        {seasons.map((y) => (
+          <button
+            key={y}
+            onClick={() => setSeason(y)}
+            className="text-sm px-3 py-1 rounded"
+            style={{
+              background: y === effectiveSeason ? "#231f20" : "transparent",
+              color: y === effectiveSeason ? "#fff" : "#6a6a6a",
+              border: `1px solid ${y === effectiveSeason ? "#231f20" : "#ddd"}`,
+            }}
+          >
+            {y}
+          </button>
+        ))}
+      </div>
 
       <div className="flex gap-2 mb-6">
         <button
@@ -72,20 +100,28 @@ export default function RadioTopicsDive() {
         </button>
       </div>
 
-      {view === "race" ? <RaceTopicsDetail /> : <SeasonTopicsEvolution />}
+      {view === "race" ? (
+        <RaceTopicsDetail season={effectiveSeason} />
+      ) : (
+        <SeasonTopicsEvolution season={effectiveSeason} />
+      )}
     </div>
   );
 }
 
-function SeasonTopicsEvolution() {
+function SeasonTopicsEvolution({ season }: { season: number | null }) {
   const [groupBy, setGroupBy] = useDiveState<"driver" | "team">("groupBy", "driver");
 
-  const entitiesQ = useSQLQuery(`
-    select distinct
-      ${groupBy === "driver" ? "driver_acronym as entity, team_colour as color" : "team_name as entity, team_colour as color"}
-    from ${FCT_DRIVER_TOPIC_RACE}
-    order by entity
-  `);
+  const entitiesQ = useSQLQuery(
+    `
+      select distinct
+        ${groupBy === "driver" ? "driver_acronym as entity, team_colour as color" : "team_name as entity, team_colour as color"}
+      from ${FCT_DRIVER_TOPIC_RACE}
+      where year = ${season}
+      order by entity
+    `,
+    { enabled: season != null },
+  );
   const entities = Array.isArray(entitiesQ.data) ? entitiesQ.data : [];
 
   // useDiveState persists to a URL fragment, so `entity` can come from a
@@ -110,11 +146,12 @@ function SeasonTopicsEvolution() {
         topic_label,
         sum(message_count) as message_count
       from ${FCT_DRIVER_TOPIC_RACE}
-      where ${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'
+      where year = ${season}
+        and ${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'
       group by 1, 2, 3, 4
       order by session_date
     `,
-    { enabled: effectiveEntity != null },
+    { enabled: season != null && effectiveEntity != null },
   );
   const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
 
@@ -226,17 +263,29 @@ function buildStackedSeries(rows: Record<string, unknown>[]) {
   return { chartData, topics };
 }
 
-function RaceTopicsDetail() {
-  const sessionsQ = useSQLQuery(`
-    select distinct session_key, circuit_short_name, session_date
-    from ${FCT_DRIVER_TOPIC_RACE}
-    order by session_date
-  `);
+function RaceTopicsDetail({ season }: { season: number | null }) {
+  const sessionsQ = useSQLQuery(
+    `
+      select distinct session_key, circuit_short_name, session_date
+      from ${FCT_DRIVER_TOPIC_RACE}
+      where year = ${season}
+      order by session_date
+    `,
+    { enabled: season != null },
+  );
   const sessions = Array.isArray(sessionsQ.data) ? sessionsQ.data : [];
 
+  // Same known-values guard as `entity` above — a `session` left over from a
+  // previously-selected season (or a crafted link) shouldn't silently be
+  // trusted just because it's non-null.
   const [sessionKey, setSessionKey] = useDiveState<number | null>("session", null);
+  const knownSessionKeys = new Set(sessions.map((s) => N(s.session_key)));
   const effectiveSessionKey =
-    sessionKey ?? (sessions.length ? N(sessions[sessions.length - 1].session_key) : null);
+    sessionKey != null && knownSessionKeys.has(sessionKey)
+      ? sessionKey
+      : sessions.length
+        ? N(sessions[sessions.length - 1].session_key)
+        : null;
 
   const messagesQ = useSQLQuery(
     `

@@ -64,5 +64,7 @@ select
     t.top_keywords as topic_keywords
 from message_laps m
 left join sessions se on m.session_key = se.session_key
-left join drivers d on m.driver_number = d.driver_number
+left join drivers d
+    on m.driver_number = d.driver_number
+    and m.session_key = d.session_key
 left join topics t on m.topic_id = t.topic_id
