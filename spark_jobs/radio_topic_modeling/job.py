@@ -61,11 +61,14 @@ RETRY_BACKOFF_SEC = 2
 RATE_LIMIT_BACKOFF_SEC = 5
 INTER_REQUEST_SLEEP_SEC = 0.5
 
-# "base" mis-hears enough short, jargon-heavy radio calls to matter for
-# topic modeling (e.g. "Plan A" -> "plane") — "small" is a meaningful
-# accuracy step up for a modest compute cost increase, still comfortably
-# fast enough for a season's few thousand short clips.
-WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")
+# "small" still mis-hears enough short, jargon-heavy radio calls to matter
+# for topic modeling (e.g. "Plan A" -> "plane") — "medium" is a further
+# accuracy step up (~2x the compute of "small") that's still comfortably
+# fast enough for a season's few thousand short clips. This default must
+# match whatever WHISPER_MODEL_SIZE the image was built with (see
+# Dockerfile's matching ARG and setup.sh's --build-arg) — it only controls
+# what gets requested at runtime, not what's actually pre-baked.
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "medium")
 # Biases Whisper toward F1 radio's actual vocabulary instead of the nearest
 # everyday-English homophone (e.g. "Plan A"/"Plan B" -> "plane", "box" ->
 # "box" mis-heard as something else) -- faster-whisper primes decoding with

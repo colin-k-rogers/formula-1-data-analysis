@@ -34,6 +34,11 @@ source ./state.sh   # written by setup.sh: APP_ID, VPC_ID, SUBNET_ID, SG_ID
 
 MODEL_STORE_PATH="s3://${BUCKET_NAME}/models/bertopic/model.tar.gz"
 ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/f1-radio-topics-emrs-role"
+# Falls back to the Dockerfile/setup.sh default if .env predates this
+# variable -- must match whatever size the image was actually built with
+# (see setup.sh's --build-arg), since this only controls what the running
+# job requests, not what's pre-baked.
+WHISPER_MODEL_SIZE="${WHISPER_MODEL_SIZE:-medium}"
 
 EXTRA_CONF=""
 if [ -n "${FORCE_REFIT:-}" ]; then
@@ -49,7 +54,7 @@ JOB_RUN_ID=$(aws emr-serverless start-job-run \
     --job-driver "{
       \"sparkSubmit\": {
         \"entryPoint\": \"local:///opt/radio_topic_modeling/job.py\",
-        \"sparkSubmitParameters\": \"--conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=/opt/venv/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=/opt/venv/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=/opt/venv/bin/python --conf spark.emr-serverless.driverEnv.SEASON_YEAR=${SEASON_YEAR} --conf spark.emr-serverless.driverEnv.MODEL_STORE_PATH=${MODEL_STORE_PATH}${EXTRA_CONF} --conf spark.jars=/usr/share/aws/iceberg/lib/iceberg-spark3-runtime.jar --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.defaultCatalog=${CATALOG_NAME} --conf spark.sql.catalog.${CATALOG_NAME}=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.${CATALOG_NAME}.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.${CATALOG_NAME}.warehouse=s3://${BUCKET_NAME}/warehouse --conf spark.sql.catalog.${CATALOG_NAME}.io-impl=org.apache.iceberg.aws.s3.S3FileIO\"
+        \"sparkSubmitParameters\": \"--conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=/opt/venv/bin/python --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=/opt/venv/bin/python --conf spark.executorEnv.PYSPARK_PYTHON=/opt/venv/bin/python --conf spark.emr-serverless.driverEnv.SEASON_YEAR=${SEASON_YEAR} --conf spark.emr-serverless.driverEnv.MODEL_STORE_PATH=${MODEL_STORE_PATH} --conf spark.executorEnv.WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE}${EXTRA_CONF} --conf spark.jars=/usr/share/aws/iceberg/lib/iceberg-spark3-runtime.jar --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.defaultCatalog=${CATALOG_NAME} --conf spark.sql.catalog.${CATALOG_NAME}=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.${CATALOG_NAME}.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.${CATALOG_NAME}.warehouse=s3://${BUCKET_NAME}/warehouse --conf spark.sql.catalog.${CATALOG_NAME}.io-impl=org.apache.iceberg.aws.s3.S3FileIO\"
       }
     }" \
     --configuration-overrides "{

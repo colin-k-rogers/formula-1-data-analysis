@@ -22,7 +22,7 @@ COPY job.py /opt/radio_topic_modeling/job.py
 # Pre-download model weights at build time so the job doesn't re-fetch them
 # at runtime — executors never need outbound internet this way; only the
 # driver does, to reach the OpenF1 API (see README.md's network setup).
-ARG WHISPER_MODEL_SIZE=base
+ARG WHISPER_MODEL_SIZE=medium
 ARG EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
 
 # Everything that touches /opt/venv (creating it, installing ~1.7GB of

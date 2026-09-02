@@ -98,7 +98,7 @@ only controls what's baked in, not what the running job requests:
 | Variable | Default | Scope | Purpose |
 |---|---|---|---|
 | `SEASON_YEAR` | `2025` | driver | Which season's Race sessions to pull team radio for |
-| `WHISPER_MODEL_SIZE` | `base` | executor | faster-whisper model size (`tiny`/`base`/`small`/`medium`/`large-v3`) — bigger = more accurate, slower, must match the `--build-arg` used when building the image so the weights are pre-baked |
+| `WHISPER_MODEL_SIZE` | `medium` | executor | faster-whisper model size (`tiny`/`base`/`small`/`medium`/`large-v3`) — bigger = more accurate, slower, must match the `--build-arg` used when building the image so the weights are pre-baked |
 | `EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | driver | sentence-transformers model BERTopic embeds transcripts with |
 | `ICEBERG_CATALOG_NAME` | `radio` | driver | Must match `${CATALOG_NAME}` used in the `spark.sql.catalog.*` properties above |
 | `ICEBERG_NAMESPACE` | `raw` | driver | Iceberg namespace (= Glue database name) the two output tables are created under |
