@@ -16,8 +16,11 @@ addresses Iceberg tables by name (`${CATALOG_NAME}.${ICEBERG_NAMESPACE}.*`),
 so it doesn't need to change if the catalog backend does.
 
 Incremental by default: a run only fetches/transcribes sessions that aren't
-already in radio_messages (or are explicitly listed in REPROCESS_SESSIONS),
-and assigns their topics with `BERTopic.transform()` against a model
+already in radio_messages (or are explicitly listed in REPROCESS_SESSIONS,
+or REPROCESS_ALL=true is set to reprocess every session in SEASON_YEAR --
+e.g. after switching WHISPER_MODEL_SIZE and wanting the whole season
+re-transcribed with it), and assigns their topics with `BERTopic.transform()`
+against a model
 persisted at MODEL_STORE_PATH from the last fit — not a fresh `fit_transform`
 every time. Refitting from scratch every run would reshuffle topic ids/labels
 for every prior race too, which defeats the point of tracking how topics
@@ -90,6 +93,10 @@ FORCE_REFIT = os.environ.get("FORCE_REFIT", "false").lower() == "true"
 REPROCESS_SESSIONS = {
     int(s) for s in os.environ.get("REPROCESS_SESSIONS", "").split(",") if s.strip()
 }
+# Reprocess every session in SEASON_YEAR, not just ones listed individually
+# in REPROCESS_SESSIONS -- for a whole-season re-transcription (e.g. after
+# switching WHISPER_MODEL_SIZE) without having to enumerate session keys.
+REPROCESS_ALL = os.environ.get("REPROCESS_ALL", "false").lower() == "true"
 
 
 def fetch(endpoint, params):
@@ -415,7 +422,9 @@ def main():
     all_sessions = fetch_race_sessions(season_year)
     sessions_to_process = [
         s for s in all_sessions
-        if s["session_key"] not in already_processed or s["session_key"] in REPROCESS_SESSIONS
+        if REPROCESS_ALL
+        or s["session_key"] not in already_processed
+        or s["session_key"] in REPROCESS_SESSIONS
     ]
     radio_metadata = fetch_team_radio_for_sessions(sessions_to_process) if sessions_to_process else []
 

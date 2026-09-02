@@ -105,6 +105,7 @@ only controls what's baked in, not what the running job requests:
 | `MODEL_STORE_PATH` | unset | driver | S3 path (e.g. `s3://bucket/models/bertopic/model.tar.gz`) where the fitted BERTopic model is persisted so later runs can `transform()` new documents into the same topic space instead of refitting. Leaving it unset means every run behaves like `FORCE_REFIT=true` — there's nothing to load, so it fits fresh every time |
 | `FORCE_REFIT` | `false` | driver | Refit BERTopic from scratch over every transcript ever produced and rewrite every row's topic assignment — a deliberate, rare action, not a default |
 | `REPROCESS_SESSIONS` | unset | driver | Comma-separated `session_key` list to re-fetch/re-transcribe even though already processed (e.g. an OpenF1 correction), using the existing topic space |
+| `REPROCESS_ALL` | `false` | driver | Re-fetch/re-transcribe every session in `SEASON_YEAR`, not just ones listed in `REPROCESS_SESSIONS` — for a whole-season re-transcription (e.g. after changing `WHISPER_MODEL_SIZE`) without enumerating session keys |
 
 ## Output
 

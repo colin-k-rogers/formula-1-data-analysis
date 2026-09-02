@@ -2,10 +2,12 @@
 # Submits an EMR Serverless job run:
 #   ./run.sh
 # Re-run any time you want to pick up a newly-run race weekend's radio —
-# it's incremental (see README.md). Set FORCE_REFIT=true or
-# REPROCESS_SESSIONS="<comma-separated session_key list>" in the
-# environment before calling this script to opt into those, e.g.:
+# it's incremental (see README.md). Set FORCE_REFIT=true,
+# REPROCESS_SESSIONS="<comma-separated session_key list>", or
+# REPROCESS_ALL=true (every session in SEASON_YEAR) in the environment
+# before calling this script to opt into those, e.g.:
 #   FORCE_REFIT=true ./run.sh
+#   SEASON_YEAR=2024 REPROCESS_ALL=true ./run.sh
 set -euo pipefail
 # Without this, the AWS CLI pipes any command's output through `less` when
 # run in a terminal, which blocks waiting for you to press `q`.
@@ -46,6 +48,9 @@ if [ -n "${FORCE_REFIT:-}" ]; then
 fi
 if [ -n "${REPROCESS_SESSIONS:-}" ]; then
     EXTRA_CONF+=" --conf spark.emr-serverless.driverEnv.REPROCESS_SESSIONS=${REPROCESS_SESSIONS}"
+fi
+if [ -n "${REPROCESS_ALL:-}" ]; then
+    EXTRA_CONF+=" --conf spark.emr-serverless.driverEnv.REPROCESS_ALL=${REPROCESS_ALL}"
 fi
 
 JOB_RUN_ID=$(aws emr-serverless start-job-run \
