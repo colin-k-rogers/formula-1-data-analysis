@@ -61,7 +61,21 @@ RETRY_BACKOFF_SEC = 2
 RATE_LIMIT_BACKOFF_SEC = 5
 INTER_REQUEST_SLEEP_SEC = 0.5
 
-WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "base")
+# "base" mis-hears enough short, jargon-heavy radio calls to matter for
+# topic modeling (e.g. "Plan A" -> "plane") — "small" is a meaningful
+# accuracy step up for a modest compute cost increase, still comfortably
+# fast enough for a season's few thousand short clips.
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")
+# Biases Whisper toward F1 radio's actual vocabulary instead of the nearest
+# everyday-English homophone (e.g. "Plan A"/"Plan B" -> "plane", "box" ->
+# "box" mis-heard as something else) -- faster-whisper primes decoding with
+# this as prior context rather than treating it as literal transcript.
+WHISPER_INITIAL_PROMPT = (
+    "Formula 1 team radio. Box box box, box this lap, pit stop, undercut, "
+    "overcut, Plan A, Plan B, safety car, virtual safety car, DRS, push now, "
+    "tyres, tires, degradation, undercut window, gap, delta, copy, understood, "
+    "car ahead, car behind."
+)
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
 CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "radio")
 ICEBERG_NAMESPACE = os.environ.get("ICEBERG_NAMESPACE", "raw")
@@ -190,7 +204,9 @@ def transcribe_partition(rows):
             # for quiet/noisy audio specifically. A wrong-but-plausible
             # transcript is worse for topic modeling than an English
             # transcript that's merely poor.
-            segments, info = model.transcribe(audio_buf, beam_size=5, language="en")
+            segments, info = model.transcribe(
+                audio_buf, beam_size=5, language="en", initial_prompt=WHISPER_INITIAL_PROMPT
+            )
             text = " ".join(seg.text.strip() for seg in segments).strip()
             d["transcript_text"] = text or None
             d["language"] = info.language
