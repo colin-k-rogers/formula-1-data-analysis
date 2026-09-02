@@ -36,6 +36,15 @@ function raceLabel(row: Record<string, unknown>): string {
   return `${String(row.circuit_short_name)} — ${String(row.session_date).slice(0, 10)}`;
 }
 
+// Circuit name only, no date — used for the chart's x-axis, where
+// raceLabel's full "circuit — date" text was long enough (especially
+// rotated) to run over into the plotted bars. The session dropdown still
+// uses raceLabel: there's no rotation/overflow issue there, and the date
+// helps distinguish same-circuit races across seasons when "All" is picked.
+function chartRaceLabel(row: Record<string, unknown>): string {
+  return String(row.circuit_short_name);
+}
+
 // A specific year, the "all" sentinel (no year filter), or null while the
 // season list is still loading.
 type Season = number | "all" | null;
@@ -143,7 +152,7 @@ export default function RadioTopicsDive() {
 }
 
 function SeasonTopicsEvolution({ season }: { season: Season }) {
-  const [groupBy, setGroupBy] = useDiveState<"driver" | "team">("groupBy", "driver");
+  const [groupBy, setGroupBy] = useDiveState<"driver" | "team" | "all">("groupBy", "driver");
 
   const entitiesQ = useSQLQuery(
     `
@@ -153,7 +162,9 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
       ${whereClause(seasonFilter(season))}
       order by entity
     `,
-    { enabled: season != null },
+    // "all" has no single entity to pick, so there's nothing for this query
+    // to feed — skip it rather than fetch a dropdown that won't be shown.
+    { enabled: season != null && groupBy !== "all" },
   );
   const entities = Array.isArray(entitiesQ.data) ? entitiesQ.data : [];
 
@@ -181,12 +192,14 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
       from ${FCT_DRIVER_TOPIC_RACE}
       ${whereClause(
         seasonFilter(season),
-        `${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'`,
+        groupBy === "all"
+          ? ""
+          : `${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'`,
       )}
       group by 1, 2, 3, 4
       order by session_date
     `,
-    { enabled: season != null && effectiveEntity != null },
+    { enabled: season != null && (groupBy === "all" || effectiveEntity != null) },
   );
   const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
 
@@ -196,7 +209,7 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
     <div>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className="flex gap-2">
-          {(["driver", "team"] as const).map((g) => (
+          {(["driver", "team", "all"] as const).map((g) => (
             <button
               key={g}
               onClick={() => {
@@ -210,12 +223,12 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
                 border: `1px solid ${groupBy === g ? "#231f20" : "#ddd"}`,
               }}
             >
-              By {g}
+              {g === "all" ? "All" : `By ${g}`}
             </button>
           ))}
         </div>
 
-        {entitiesQ.isLoading ? (
+        {groupBy === "all" ? null : entitiesQ.isLoading ? (
           <div className="h-8 w-40 bg-gray-200 animate-pulse rounded" />
         ) : (
           <select
@@ -240,7 +253,9 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
       ) : rowsQ.isError ? (
         <p style={{ color: "#bc1200" }}>Failed to load: {rowsQ.error?.message}</p>
       ) : chartData.length === 0 ? (
-        <p style={{ color: "#6a6a6a" }}>No radio messages found for {effectiveEntity}.</p>
+        <p style={{ color: "#6a6a6a" }}>
+          No radio messages found{groupBy === "all" ? "" : ` for ${effectiveEntity}`}.
+        </p>
       ) : (
         <ResponsiveContainer width="100%" height={340}>
           <BarChart data={chartData}>
@@ -285,7 +300,7 @@ function buildStackedSeries(rows: Record<string, unknown>[]) {
   for (const r of rows) {
     const sessionKey = N(r.session_key);
     if (!byRace.has(sessionKey)) {
-      byRace.set(sessionKey, { session_key: sessionKey, race: raceLabel(r) });
+      byRace.set(sessionKey, { session_key: sessionKey, race: chartRaceLabel(r) });
     }
     const row = byRace.get(sessionKey)!;
     const topic = String(r.topic_label);
