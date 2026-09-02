@@ -312,8 +312,10 @@ def fit_topics_fresh(docs_pdf, embedding_model):
     # Radio calls are short (a sentence or two) and there are only hundreds
     # of them a season — BERTopic's defaults are tuned for larger,
     # longer-form corpora and collapse data like this into one dominant
-    # cluster. A smaller UMAP neighborhood and lower min_topic_size let
-    # more, smaller topics actually form instead of one catch-all blob.
+    # cluster. A smaller UMAP neighborhood lets more, smaller topics form
+    # instead of one catch-all blob; min_topic_size below then controls how
+    # many of those survive as their own topic vs. get folded into a
+    # neighbor or the outlier bucket.
     umap_model = UMAP(n_neighbors=10, n_components=5, min_dist=0.0, metric="cosine", random_state=42)
     # Default c-TF-IDF keywords are plain word counts with no stopword
     # filtering, so labels end up as "the, to, it, we" instead of actual
@@ -326,12 +328,19 @@ def fit_topics_fresh(docs_pdf, embedding_model):
     # c-TF-IDF counts alone.
     representation_model = KeyBERTInspired()
 
+    # Raised from an earlier 8: that produced 80+ topics on a multi-season
+    # corpus, including a long tail of topics with only a dozen-ish
+    # messages each (individual driver names, one-off events) that were too
+    # granular to be useful for tracking how *broad* conversation themes
+    # evolve across a season. A larger minimum folds those into the nearest
+    # topic (or the outlier bucket) instead, leaving a smaller set of
+    # topics with enough volume to actually be worth tracking race-to-race.
     topic_model = BERTopic(
         embedding_model=embedding_model,
         umap_model=umap_model,
         vectorizer_model=vectorizer_model,
         representation_model=representation_model,
-        min_topic_size=8,
+        min_topic_size=25,
         calculate_probabilities=True,
     )
     topics, probabilities = topic_model.fit_transform(docs_pdf["transcript_text"].tolist())
