@@ -299,6 +299,22 @@ def transcribe_partition(rows):
                 vad_filter=True, condition_on_previous_text=False,
             )
             text = " ".join(seg.text.strip() for seg in segments).strip()
+            if not text:
+                # vad_filter occasionally (non-deterministically -- a
+                # numerical edge case in faster-whisper's feature extractor
+                # on long, mostly-silent audio, confirmed by re-running the
+                # exact same clip locally and getting a real transcript on
+                # some runs and zero detected speech on others) decides an
+                # entire clip has no speech in it even when it does. Retry
+                # once without VAD rather than silently losing the message
+                # to that flakiness -- worst case this falls back to the
+                # pre-VAD repetition-loop hallucination on these rare
+                # clips, which is still strictly better than no transcript.
+                segments, info = model.transcribe(
+                    io.BytesIO(resp.content), beam_size=5, language="en",
+                    initial_prompt=WHISPER_INITIAL_PROMPT, condition_on_previous_text=False,
+                )
+                text = " ".join(seg.text.strip() for seg in segments).strip()
             d["transcript_text"] = text or None
             d["language"] = info.language
             d["duration_sec"] = info.duration
