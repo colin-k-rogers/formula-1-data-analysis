@@ -36,6 +36,7 @@ had, or missing entirely.
 import hashlib
 import io
 import os
+import re
 import tarfile
 import tempfile
 import time
@@ -83,6 +84,21 @@ WHISPER_INITIAL_PROMPT = (
     "car ahead, car behind."
 )
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+# Driver/team names dominate short radio utterances enough that BERTopic's
+# embeddings cluster messages by WHO is mentioned ("Norris is 8 seconds
+# behind", "Alonso is 15 seconds behind") into separate topics instead of
+# grouping them by the actual theme (race-position/gap updates) they share.
+# That identity is already captured elsewhere in the data model (every
+# message row carries its own driver_number/team), so nothing is lost by
+# stripping names from just the text handed to the topic model -- see
+# build_name_strip_pattern()/anonymize_names() below.
+MIN_NAME_STRIP_LEN = 4
+# Name tokens that double as ordinary English words used in genuine radio
+# topics (e.g. "push to the max", "max attack") -- stripping these would
+# delete real topical content, not just an identity, so they're excluded
+# even though they're a driver's first name. Extend this if a future
+# season's grid introduces another collision.
+AMBIGUOUS_NAME_STOPWORDS = {"max"}
 CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "radio")
 ICEBERG_NAMESPACE = os.environ.get("ICEBERG_NAMESPACE", "raw")
 # Where the fitted BERTopic model is persisted between runs, e.g.
@@ -156,6 +172,59 @@ def fetch_team_radio_for_sessions(sessions):
         radio_messages.extend(messages)
         time.sleep(INTER_REQUEST_SLEEP_SEC)
     return radio_messages
+
+
+def fetch_driver_rosters(sessions):
+    """Driver name/team metadata for the given sessions' grid -- used only
+    to build the name-stripping pattern in build_name_strip_pattern(), never
+    stored. Deduped by name_acronym since the same driver reappears in every
+    session of a season."""
+    rosters = []
+    seen_acronyms = set()
+    for session in sessions:
+        for d in fetch("drivers", {"session_key": session["session_key"]}):
+            acronym = d.get("name_acronym")
+            if acronym and acronym not in seen_acronyms:
+                seen_acronyms.add(acronym)
+                rosters.append(d)
+        time.sleep(INTER_REQUEST_SLEEP_SEC)
+    return rosters
+
+
+def build_name_strip_pattern(driver_rosters):
+    """Compiles a single case-insensitive, word-boundary regex matching any
+    driver's first/last name or team name from `driver_rosters`, for
+    anonymize_names() to strip out of text before it reaches the topic
+    model. Short and ambiguous tokens (see MIN_NAME_STRIP_LEN,
+    AMBIGUOUS_NAME_STOPWORDS) are excluded so real vocabulary isn't
+    collateral damage. Returns None if there's nothing to strip, so callers
+    can skip anonymization entirely (e.g. no sessions found this run)."""
+    tokens = set()
+    for d in driver_rosters:
+        candidates = [d.get("first_name"), d.get("last_name"), d.get("team_name")]
+        for token in candidates:
+            if token and len(token) >= MIN_NAME_STRIP_LEN and token.lower() not in AMBIGUOUS_NAME_STOPWORDS:
+                tokens.add(token)
+    if not tokens:
+        return None
+    # Longest-first so a multi-word team name (e.g. "Red Bull Racing")
+    # matches whole rather than leaving fragments behind piecemeal.
+    alternation = "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True))
+    return re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
+
+
+def anonymize_names(text, name_strip_pattern):
+    """Strips driver/team names out of `text` for topic-modeling purposes
+    only (the original transcript_text is never overwritten). Falls back to
+    the original text if stripping would leave nothing (e.g. a message that
+    is just a driver's name) rather than handing BERTopic a blank string."""
+    if name_strip_pattern is None or not text:
+        return text
+    stripped, n_subs = name_strip_pattern.subn("", text)
+    if n_subs == 0:
+        return text
+    collapsed = re.sub(r"\s{2,}", " ", stripped).strip(" ,.")
+    return collapsed or text
 
 
 RADIO_METADATA_SCHEMA = StructType([
@@ -299,11 +368,54 @@ def _assignments_frame(radio_message_ids, topics, probabilities):
     })
 
 
+# Deliberately curated, not a general dedup pass: each group is a set of
+# keywords that name the SAME radio call/theme in different words, verified
+# by reading actual transcripts (e.g. "box, box, this lap" and "why do we
+# pit if we undercut" are both the pit-stop call). Getting a group wrong
+# would silently conflate two genuinely different topics, so only add one
+# after checking sample transcripts, the way this one was checked.
+SYNONYM_MERGE_GROUPS = [
+    ["box", "pit"],
+]
+
+
+def _topic_ids_matching_keyword(topic_info, keyword):
+    """Ids of topics (excluding -1, the outlier bucket) whose top keywords
+    include `keyword` as a whole word — lets merge_synonym_topics() locate
+    topics by content instead of by id, since ids/counts shift on every
+    refit."""
+    return [
+        topic_id
+        for topic_id, representation in zip(topic_info["Topic"], topic_info["Representation"])
+        if topic_id != -1 and keyword in (kw.lower() for kw in representation)
+    ]
+
+
+def merge_synonym_topics(topic_model, docs):
+    """Merges topics that nr_topics="auto" can't catch because they're
+    lexically distinct despite describing the same call (see
+    SYNONYM_MERGE_GROUPS) — mutates `topic_model` in place. `docs` must be
+    the exact same list already passed to fit_transform(), same order."""
+    for keywords in SYNONYM_MERGE_GROUPS:
+        # Re-fetched every iteration since merging one group renumbers
+        # topic ids, which would stale-out a topic_info computed earlier.
+        topic_info = topic_model.get_topic_info()
+        topic_ids = {
+            topic_id
+            for keyword in keywords
+            for topic_id in _topic_ids_matching_keyword(topic_info, keyword)
+        }
+        if len(topic_ids) > 1:
+            topic_model.merge_topics(docs, topics_to_merge=list(topic_ids))
+
+
 def fit_topics_fresh(docs_pdf, embedding_model):
     """Fits a brand-new BERTopic model over `docs_pdf` (radio_message_id,
-    transcript_text) — used for the very first run ever (nothing to load
-    from MODEL_STORE_PATH yet) and for a deliberate FORCE_REFIT. Returns
-    (assignments, topics, fitted_model)."""
+    transcript_text, model_text) — used for the very first run ever
+    (nothing to load from MODEL_STORE_PATH yet) and for a deliberate
+    FORCE_REFIT. Clusters/labels are computed from model_text (the
+    name-anonymized copy of transcript_text — see anonymize_names()), not
+    transcript_text itself. Returns (assignments, topics, fitted_model)."""
     from bertopic import BERTopic
     from bertopic.representation import KeyBERTInspired
     from sklearn.feature_extraction.text import CountVectorizer
@@ -341,12 +453,24 @@ def fit_topics_fresh(docs_pdf, embedding_model):
         vectorizer_model=vectorizer_model,
         representation_model=representation_model,
         min_topic_size=25,
+        # Runs BERTopic's built-in post-fit merge: topics whose c-TF-IDF
+        # (keyword-count) vectors are highly similar get combined into one.
+        # This only catches topics that already share vocabulary, though —
+        # a "box box" topic and a "pit stop" topic describe the exact same
+        # radio call but share almost no words, so this alone won't merge
+        # them; see merge_synonym_topics() below for that case.
+        nr_topics="auto",
         calculate_probabilities=True,
     )
-    topics, probabilities = topic_model.fit_transform(docs_pdf["transcript_text"].tolist())
-    assignments = _assignments_frame(docs_pdf["radio_message_id"], topics, probabilities)
+    docs = docs_pdf["model_text"].tolist()
+    topics, probabilities = topic_model.fit_transform(docs)
+    merge_synonym_topics(topic_model, docs)
 
     topic_info = topic_model.get_topic_info()  # columns: Topic, Count, Name, Representation, ...
+    # merge_synonym_topics (if it merged anything) only updates
+    # topic_model.topics_, not the `topics` array fit_transform returned —
+    # read the post-merge assignment from there instead.
+    assignments = _assignments_frame(docs_pdf["radio_message_id"], topic_model.topics_, probabilities)
     topics_out = pd.DataFrame({
         "topic_id": topic_info["Topic"],
         "label": topic_info["Name"],
@@ -359,8 +483,9 @@ def fit_topics_fresh(docs_pdf, embedding_model):
 def transform_topics(topic_model, docs_pdf):
     """Assigns `docs_pdf` into an already-fitted model's EXISTING topic
     space, instead of refitting — this is what keeps topic ids/labels
-    stable across runs in the common (non-FORCE_REFIT) case."""
-    topics, probabilities = topic_model.transform(docs_pdf["transcript_text"].tolist())
+    stable across runs in the common (non-FORCE_REFIT) case. Uses
+    model_text (name-anonymized), matching what the model was fit on."""
+    topics, probabilities = topic_model.transform(docs_pdf["model_text"].tolist())
     return _assignments_frame(docs_pdf["radio_message_id"], topics, probabilities)
 
 
@@ -507,6 +632,16 @@ def main():
     if docs_pdf.empty:
         print(f"season={season_year} sessions_processed={len(sessions_to_process)} messages={n_new_messages} — no successful transcriptions to topic-model.")
         return
+
+    # Best-effort roster for THIS run's season_year -- covers the vast
+    # majority of name mentions (current teammates/rivals), though a
+    # FORCE_REFIT over a multi-season corpus won't have older seasons'
+    # rosters unless a prior run already fetched them. Good enough: it
+    # still fixes the problem going forward without persisting a whole
+    # separate driver-name store alongside MODEL_STORE_PATH.
+    driver_rosters = fetch_driver_rosters(all_sessions) if all_sessions else []
+    name_strip_pattern = build_name_strip_pattern(driver_rosters)
+    docs_pdf["model_text"] = docs_pdf["transcript_text"].map(lambda t: anonymize_names(t, name_strip_pattern))
 
     topics_df = None
     if topic_model is None:
