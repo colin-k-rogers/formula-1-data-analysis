@@ -98,13 +98,14 @@ only controls what's baked in, not what the running job requests:
 | Variable | Default | Scope | Purpose |
 |---|---|---|---|
 | `SEASON_YEAR` | `2025` | driver | Which season's Race sessions to pull team radio for |
-| `WHISPER_MODEL_SIZE` | `base` | executor | faster-whisper model size (`tiny`/`base`/`small`/`medium`/`large-v3`) — bigger = more accurate, slower, must match the `--build-arg` used when building the image so the weights are pre-baked |
+| `WHISPER_MODEL_SIZE` | `medium` | executor | faster-whisper model size (`tiny`/`base`/`small`/`medium`/`large-v3`) — bigger = more accurate, slower, must match the `--build-arg` used when building the image so the weights are pre-baked |
 | `EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | driver | sentence-transformers model BERTopic embeds transcripts with |
 | `ICEBERG_CATALOG_NAME` | `radio` | driver | Must match `${CATALOG_NAME}` used in the `spark.sql.catalog.*` properties above |
 | `ICEBERG_NAMESPACE` | `raw` | driver | Iceberg namespace (= Glue database name) the two output tables are created under |
 | `MODEL_STORE_PATH` | unset | driver | S3 path (e.g. `s3://bucket/models/bertopic/model.tar.gz`) where the fitted BERTopic model is persisted so later runs can `transform()` new documents into the same topic space instead of refitting. Leaving it unset means every run behaves like `FORCE_REFIT=true` — there's nothing to load, so it fits fresh every time |
 | `FORCE_REFIT` | `false` | driver | Refit BERTopic from scratch over every transcript ever produced and rewrite every row's topic assignment — a deliberate, rare action, not a default |
 | `REPROCESS_SESSIONS` | unset | driver | Comma-separated `session_key` list to re-fetch/re-transcribe even though already processed (e.g. an OpenF1 correction), using the existing topic space |
+| `REPROCESS_ALL` | `false` | driver | Re-fetch/re-transcribe every session in `SEASON_YEAR`, not just ones listed in `REPROCESS_SESSIONS` — for a whole-season re-transcription (e.g. after changing `WHISPER_MODEL_SIZE`) without enumerating session keys |
 
 ## Output
 

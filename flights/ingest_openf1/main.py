@@ -94,6 +94,19 @@ def load_table(con, tmp_path, records, table, key_columns, key_values):
         f"SELECT * FROM read_json_auto('{tmp_path}') WHERE false"
     )
 
+    # A column that's NULL in every row of the batch that first creates the
+    # table gets inferred as JSON (DuckDB's fallback type for an all-null
+    # sample) -- widen it to VARCHAR so a later batch with real string
+    # values for that column (e.g. country_code) doesn't fail to cast.
+    json_columns = con.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_catalog = 'f1' AND table_schema = 'raw' AND table_name = ? "
+        "AND data_type = 'JSON'",
+        [table],
+    ).fetchall()
+    for (column_name,) in json_columns:
+        con.execute(f"ALTER TABLE f1.raw.{table} ALTER COLUMN {column_name} TYPE VARCHAR")
+
     con.execute(f"INSERT INTO f1.raw.{table} SELECT * FROM read_json_auto('{tmp_path}')")
     return len(records)
 

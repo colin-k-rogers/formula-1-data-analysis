@@ -12,7 +12,9 @@ models:
     columns:
       - name: driver_number
         tests:
-          - unique
+          - not_null
+      - name: session_key
+        tests:
           - not_null
 
   - name: fct_laps

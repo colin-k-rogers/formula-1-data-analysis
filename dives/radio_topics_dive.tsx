@@ -36,8 +36,50 @@ function raceLabel(row: Record<string, unknown>): string {
   return `${String(row.circuit_short_name)} — ${String(row.session_date).slice(0, 10)}`;
 }
 
+// Circuit name only, no date — used for the chart's x-axis, where
+// raceLabel's full "circuit — date" text was long enough (especially
+// rotated) to run over into the plotted bars. The session dropdown still
+// uses raceLabel: there's no rotation/overflow issue there, and the date
+// helps distinguish same-circuit races across seasons when "All" is picked.
+function chartRaceLabel(row: Record<string, unknown>): string {
+  return String(row.circuit_short_name);
+}
+
+// A specific year, the "all" sentinel (no year filter), or null while the
+// season list is still loading.
+type Season = number | "all" | null;
+
+/** SQL fragment restricting to a single season, or "" for "all"/null (no
+ * filter — every query here already validated `season` against the known
+ * season list or the "all" sentinel before it reaches SQL). */
+function seasonFilter(season: Season): string {
+  return season != null && season !== "all" ? `year = ${season}` : "";
+}
+
+/** Joins non-empty SQL conditions with `and`, prefixed with `where` — so
+ * callers can freely mix an optional season filter with other conditions
+ * without juggling `where`/`and` placement themselves. */
+function whereClause(...conditions: string[]): string {
+  const parts = conditions.filter(Boolean);
+  return parts.length ? `where ${parts.join(" and ")}` : "";
+}
+
 export default function RadioTopicsDive() {
   const [view, setView] = useDiveState<"season" | "race">("view", "season");
+
+  const seasonsQ = useSQLQuery(`
+    select distinct year from ${FCT_DRIVER_TOPIC_RACE} order by year desc
+  `);
+  const seasons = (Array.isArray(seasonsQ.data) ? seasonsQ.data : []).map((r) => N(r.year));
+
+  // Same URL-state-can't-be-trusted-verbatim rule as `entity`/`session`
+  // below: only accept a season that's actually one of this query's results
+  // (or the "all" sentinel, which is always valid).
+  const [season, setSeason] = useDiveState<Season>("season_year", null);
+  const effectiveSeason: Season =
+    season === "all" || (season != null && seasons.includes(season))
+      ? season
+      : (seasons[0] ?? null);
 
   return (
     <div className="p-6" style={{ background: "#f8f8f8", maxWidth: 960, margin: "0 auto" }}>
@@ -48,6 +90,34 @@ export default function RadioTopicsDive() {
         What drivers and teams talk about on team radio, transcribed with Whisper and
         topic-modeled with BERTopic, tracked across the season.
       </p>
+
+      <div className="flex gap-2 mb-4">
+        <button
+          onClick={() => setSeason("all")}
+          className="text-sm px-3 py-1 rounded"
+          style={{
+            background: effectiveSeason === "all" ? "#231f20" : "transparent",
+            color: effectiveSeason === "all" ? "#fff" : "#6a6a6a",
+            border: `1px solid ${effectiveSeason === "all" ? "#231f20" : "#ddd"}`,
+          }}
+        >
+          All
+        </button>
+        {seasons.map((y) => (
+          <button
+            key={y}
+            onClick={() => setSeason(y)}
+            className="text-sm px-3 py-1 rounded"
+            style={{
+              background: y === effectiveSeason ? "#231f20" : "transparent",
+              color: y === effectiveSeason ? "#fff" : "#6a6a6a",
+              border: `1px solid ${y === effectiveSeason ? "#231f20" : "#ddd"}`,
+            }}
+          >
+            {y}
+          </button>
+        ))}
+      </div>
 
       <div className="flex gap-2 mb-6">
         <button
@@ -72,20 +142,30 @@ export default function RadioTopicsDive() {
         </button>
       </div>
 
-      {view === "race" ? <RaceTopicsDetail /> : <SeasonTopicsEvolution />}
+      {view === "race" ? (
+        <RaceTopicsDetail season={effectiveSeason} />
+      ) : (
+        <SeasonTopicsEvolution season={effectiveSeason} />
+      )}
     </div>
   );
 }
 
-function SeasonTopicsEvolution() {
-  const [groupBy, setGroupBy] = useDiveState<"driver" | "team">("groupBy", "driver");
+function SeasonTopicsEvolution({ season }: { season: Season }) {
+  const [groupBy, setGroupBy] = useDiveState<"driver" | "team" | "all">("groupBy", "driver");
 
-  const entitiesQ = useSQLQuery(`
-    select distinct
-      ${groupBy === "driver" ? "driver_acronym as entity, team_colour as color" : "team_name as entity, team_colour as color"}
-    from ${FCT_DRIVER_TOPIC_RACE}
-    order by entity
-  `);
+  const entitiesQ = useSQLQuery(
+    `
+      select distinct
+        ${groupBy === "driver" ? "driver_acronym as entity" : "team_name as entity"}
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season))}
+      order by entity
+    `,
+    // "all" has no single entity to pick, so there's nothing for this query
+    // to feed — skip it rather than fetch a dropdown that won't be shown.
+    { enabled: season != null && groupBy !== "all" },
+  );
   const entities = Array.isArray(entitiesQ.data) ? entitiesQ.data : [];
 
   // useDiveState persists to a URL fragment, so `entity` can come from a
@@ -110,11 +190,16 @@ function SeasonTopicsEvolution() {
         topic_label,
         sum(message_count) as message_count
       from ${FCT_DRIVER_TOPIC_RACE}
-      where ${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'
+      ${whereClause(
+        seasonFilter(season),
+        groupBy === "all"
+          ? ""
+          : `${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'`,
+      )}
       group by 1, 2, 3, 4
       order by session_date
     `,
-    { enabled: effectiveEntity != null },
+    { enabled: season != null && (groupBy === "all" || effectiveEntity != null) },
   );
   const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
 
@@ -124,7 +209,7 @@ function SeasonTopicsEvolution() {
     <div>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className="flex gap-2">
-          {(["driver", "team"] as const).map((g) => (
+          {(["driver", "team", "all"] as const).map((g) => (
             <button
               key={g}
               onClick={() => {
@@ -138,12 +223,12 @@ function SeasonTopicsEvolution() {
                 border: `1px solid ${groupBy === g ? "#231f20" : "#ddd"}`,
               }}
             >
-              By {g}
+              {g === "all" ? "All" : `By ${g}`}
             </button>
           ))}
         </div>
 
-        {entitiesQ.isLoading ? (
+        {groupBy === "all" ? null : entitiesQ.isLoading ? (
           <div className="h-8 w-40 bg-gray-200 animate-pulse rounded" />
         ) : (
           <select
@@ -168,12 +253,22 @@ function SeasonTopicsEvolution() {
       ) : rowsQ.isError ? (
         <p style={{ color: "#bc1200" }}>Failed to load: {rowsQ.error?.message}</p>
       ) : chartData.length === 0 ? (
-        <p style={{ color: "#6a6a6a" }}>No radio messages found for {effectiveEntity}.</p>
+        <p style={{ color: "#6a6a6a" }}>
+          No radio messages found{groupBy === "all" ? "" : ` for ${effectiveEntity}`}.
+        </p>
       ) : (
         <ResponsiveContainer width="100%" height={340}>
           <BarChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-            <XAxis dataKey="race" fontSize={11} interval={0} angle={-30} textAnchor="end" height={70} />
+            <XAxis
+              dataKey="race"
+              fontSize={11}
+              interval={0}
+              angle={-30}
+              textAnchor="end"
+              height={80}
+              tickMargin={12}
+            />
             <YAxis fontSize={11} label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }} />
             <Tooltip />
             <Legend wrapperStyle={{ fontSize: 11 }} />
@@ -213,7 +308,7 @@ function buildStackedSeries(rows: Record<string, unknown>[]) {
   for (const r of rows) {
     const sessionKey = N(r.session_key);
     if (!byRace.has(sessionKey)) {
-      byRace.set(sessionKey, { session_key: sessionKey, race: raceLabel(r) });
+      byRace.set(sessionKey, { session_key: sessionKey, race: chartRaceLabel(r) });
     }
     const row = byRace.get(sessionKey)!;
     const topic = String(r.topic_label);
@@ -226,17 +321,29 @@ function buildStackedSeries(rows: Record<string, unknown>[]) {
   return { chartData, topics };
 }
 
-function RaceTopicsDetail() {
-  const sessionsQ = useSQLQuery(`
-    select distinct session_key, circuit_short_name, session_date
-    from ${FCT_DRIVER_TOPIC_RACE}
-    order by session_date
-  `);
+function RaceTopicsDetail({ season }: { season: Season }) {
+  const sessionsQ = useSQLQuery(
+    `
+      select distinct session_key, circuit_short_name, session_date
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season))}
+      order by session_date
+    `,
+    { enabled: season != null },
+  );
   const sessions = Array.isArray(sessionsQ.data) ? sessionsQ.data : [];
 
+  // Same known-values guard as `entity` above — a `session` left over from a
+  // previously-selected season (or a crafted link) shouldn't silently be
+  // trusted just because it's non-null.
   const [sessionKey, setSessionKey] = useDiveState<number | null>("session", null);
+  const knownSessionKeys = new Set(sessions.map((s) => N(s.session_key)));
   const effectiveSessionKey =
-    sessionKey ?? (sessions.length ? N(sessions[sessions.length - 1].session_key) : null);
+    sessionKey != null && knownSessionKeys.has(sessionKey)
+      ? sessionKey
+      : sessions.length
+        ? N(sessions[sessions.length - 1].session_key)
+        : null;
 
   const messagesQ = useSQLQuery(
     `

@@ -16,8 +16,11 @@ addresses Iceberg tables by name (`${CATALOG_NAME}.${ICEBERG_NAMESPACE}.*`),
 so it doesn't need to change if the catalog backend does.
 
 Incremental by default: a run only fetches/transcribes sessions that aren't
-already in radio_messages (or are explicitly listed in REPROCESS_SESSIONS),
-and assigns their topics with `BERTopic.transform()` against a model
+already in radio_messages (or are explicitly listed in REPROCESS_SESSIONS,
+or REPROCESS_ALL=true is set to reprocess every session in SEASON_YEAR --
+e.g. after switching WHISPER_MODEL_SIZE and wanting the whole season
+re-transcribed with it), and assigns their topics with `BERTopic.transform()`
+against a model
 persisted at MODEL_STORE_PATH from the last fit — not a fresh `fit_transform`
 every time. Refitting from scratch every run would reshuffle topic ids/labels
 for every prior race too, which defeats the point of tracking how topics
@@ -61,7 +64,24 @@ RETRY_BACKOFF_SEC = 2
 RATE_LIMIT_BACKOFF_SEC = 5
 INTER_REQUEST_SLEEP_SEC = 0.5
 
-WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "base")
+# "small" still mis-hears enough short, jargon-heavy radio calls to matter
+# for topic modeling (e.g. "Plan A" -> "plane") — "medium" is a further
+# accuracy step up (~2x the compute of "small") that's still comfortably
+# fast enough for a season's few thousand short clips. This default must
+# match whatever WHISPER_MODEL_SIZE the image was built with (see
+# Dockerfile's matching ARG and setup.sh's --build-arg) — it only controls
+# what gets requested at runtime, not what's actually pre-baked.
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "medium")
+# Biases Whisper toward F1 radio's actual vocabulary instead of the nearest
+# everyday-English homophone (e.g. "Plan A"/"Plan B" -> "plane", "box" ->
+# "box" mis-heard as something else) -- faster-whisper primes decoding with
+# this as prior context rather than treating it as literal transcript.
+WHISPER_INITIAL_PROMPT = (
+    "Formula 1 team radio. Box box box, box this lap, pit stop, undercut, "
+    "overcut, Plan A, Plan B, safety car, virtual safety car, DRS, push now, "
+    "tyres, tires, degradation, undercut window, gap, delta, copy, understood, "
+    "car ahead, car behind."
+)
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
 CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "radio")
 ICEBERG_NAMESPACE = os.environ.get("ICEBERG_NAMESPACE", "raw")
@@ -73,6 +93,10 @@ FORCE_REFIT = os.environ.get("FORCE_REFIT", "false").lower() == "true"
 REPROCESS_SESSIONS = {
     int(s) for s in os.environ.get("REPROCESS_SESSIONS", "").split(",") if s.strip()
 }
+# Reprocess every session in SEASON_YEAR, not just ones listed individually
+# in REPROCESS_SESSIONS -- for a whole-season re-transcription (e.g. after
+# switching WHISPER_MODEL_SIZE) without having to enumerate session keys.
+REPROCESS_ALL = os.environ.get("REPROCESS_ALL", "false").lower() == "true"
 
 
 def fetch(endpoint, params):
@@ -182,7 +206,17 @@ def transcribe_partition(rows):
             resp = requests.get(d["recording_url"], timeout=REQUEST_TIMEOUT_SEC)
             resp.raise_for_status()
             audio_buf = io.BytesIO(resp.content)
-            segments, info = model.transcribe(audio_buf, beam_size=5)
+            # Force English rather than letting Whisper free-detect it: F1
+            # radio is overwhelmingly English, and on short/noisy/near-silent
+            # clips (routine for radio traffic) Whisper's language detector
+            # can lock onto a random language and hallucinate fluent-looking
+            # text in it — Welsh is a well-documented hallucination target
+            # for quiet/noisy audio specifically. A wrong-but-plausible
+            # transcript is worse for topic modeling than an English
+            # transcript that's merely poor.
+            segments, info = model.transcribe(
+                audio_buf, beam_size=5, language="en", initial_prompt=WHISPER_INITIAL_PROMPT
+            )
             text = " ".join(seg.text.strip() for seg in segments).strip()
             d["transcript_text"] = text or None
             d["language"] = info.language
@@ -271,8 +305,44 @@ def fit_topics_fresh(docs_pdf, embedding_model):
     from MODEL_STORE_PATH yet) and for a deliberate FORCE_REFIT. Returns
     (assignments, topics, fitted_model)."""
     from bertopic import BERTopic
+    from bertopic.representation import KeyBERTInspired
+    from sklearn.feature_extraction.text import CountVectorizer
+    from umap import UMAP
 
-    topic_model = BERTopic(embedding_model=embedding_model, calculate_probabilities=True)
+    # Radio calls are short (a sentence or two) and there are only hundreds
+    # of them a season — BERTopic's defaults are tuned for larger,
+    # longer-form corpora and collapse data like this into one dominant
+    # cluster. A smaller UMAP neighborhood lets more, smaller topics form
+    # instead of one catch-all blob; min_topic_size below then controls how
+    # many of those survive as their own topic vs. get folded into a
+    # neighbor or the outlier bucket.
+    umap_model = UMAP(n_neighbors=10, n_components=5, min_dist=0.0, metric="cosine", random_state=42)
+    # Default c-TF-IDF keywords are plain word counts with no stopword
+    # filtering, so labels end up as "the, to, it, we" instead of actual
+    # racing vocabulary. Strip stopwords and allow 2-word phrases (e.g.
+    # "pit stop", "tyre wear") so labels carry real information.
+    vectorizer_model = CountVectorizer(stop_words="english", ngram_range=(1, 2), min_df=2)
+    # Re-ranks each topic's keywords by embedding similarity to the topic
+    # itself, reusing the same embedding_model already loaded (no extra
+    # model or network call) — meaningfully more readable than raw
+    # c-TF-IDF counts alone.
+    representation_model = KeyBERTInspired()
+
+    # Raised from an earlier 8: that produced 80+ topics on a multi-season
+    # corpus, including a long tail of topics with only a dozen-ish
+    # messages each (individual driver names, one-off events) that were too
+    # granular to be useful for tracking how *broad* conversation themes
+    # evolve across a season. A larger minimum folds those into the nearest
+    # topic (or the outlier bucket) instead, leaving a smaller set of
+    # topics with enough volume to actually be worth tracking race-to-race.
+    topic_model = BERTopic(
+        embedding_model=embedding_model,
+        umap_model=umap_model,
+        vectorizer_model=vectorizer_model,
+        representation_model=representation_model,
+        min_topic_size=25,
+        calculate_probabilities=True,
+    )
     topics, probabilities = topic_model.fit_transform(docs_pdf["transcript_text"].tolist())
     assignments = _assignments_frame(docs_pdf["radio_message_id"], topics, probabilities)
 
@@ -359,57 +429,61 @@ def main():
         }
 
     all_sessions = fetch_race_sessions(season_year)
-    if not all_sessions:
-        print(f"No Race sessions found for season {season_year}; nothing to do.")
-        return
-
     sessions_to_process = [
         s for s in all_sessions
-        if s["session_key"] not in already_processed or s["session_key"] in REPROCESS_SESSIONS
+        if REPROCESS_ALL
+        or s["session_key"] not in already_processed
+        or s["session_key"] in REPROCESS_SESSIONS
     ]
-    if not sessions_to_process:
-        print(f"season={season_year}: every session already processed, nothing new to transcribe.")
+    radio_metadata = fetch_team_radio_for_sessions(sessions_to_process) if sessions_to_process else []
+
+    # A run with nothing new to transcribe for this SEASON_YEAR still needs
+    # to reach the topic-modeling stage below when FORCE_REFIT is set —
+    # refitting is a deliberate action on the corpus that's already
+    # persisted, not something that depends on this run finding new
+    # sessions. Only bail out early when there's truly nothing to do at all.
+    new_rows_df = None
+    n_new_messages = 0
+    if radio_metadata:
+        for m in radio_metadata:
+            # session_key:driver_number:date is descriptive but not
+            # guaranteed unique on its own — two radio calls could share a
+            # timestamp at OpenF1's reported precision. recording_url is
+            # guaranteed unique (each clip is a distinct file), so fold a
+            # short hash of it in too.
+            url_hash = hashlib.sha1(m["recording_url"].encode()).hexdigest()[:8]
+            m["radio_message_id"] = f"{m['session_key']}:{m['driver_number']}:{m['date']}:{url_hash}"
+            # OpenF1 dates are ISO 8601 strings; Spark's TimestampType schema
+            # needs actual datetime objects, not strings, to convert cleanly.
+            m["message_date"] = datetime.fromisoformat(m.pop("date").replace("Z", "+00:00"))
+
+        metadata_rows = [
+            {k: m.get(k) for k in RADIO_METADATA_SCHEMA.fieldNames()} for m in radio_metadata
+        ]
+        metadata_df = spark.createDataFrame(metadata_rows, schema=RADIO_METADATA_SCHEMA)
+
+        # Repartition so each partition gets a manageable, roughly even batch
+        # of clips to download+transcribe; too many partitions wastes
+        # model-load time, too few serializes the run onto a handful of
+        # executors.
+        num_partitions = max(1, min(32, len(metadata_rows) // 10 or 1))
+        transcribed_rdd = metadata_df.repartition(num_partitions).rdd.mapPartitions(transcribe_partition)
+        transcripts_df = spark.createDataFrame(transcribed_rdd, schema=TRANSCRIPT_SCHEMA)
+        new_rows_df = (
+            transcripts_df
+            .withColumn("topic_id", F.lit(None).cast(IntegerType()))
+            .withColumn("topic_probability", F.lit(None).cast(DoubleType()))
+        )
+        new_rows_df.cache()
+        n_new_messages = new_rows_df.count()
+
+        # Land this run's transcripts first (topic assignment filled in
+        # below). For a fresh fit this also makes them visible to the "read
+        # the whole corpus back" query that follows.
+        write_new_messages(spark, new_rows_df, messages_table)
+    elif not FORCE_REFIT:
+        print(f"season={season_year}: nothing new to transcribe this run; nothing to do.")
         return
-
-    radio_metadata = fetch_team_radio_for_sessions(sessions_to_process)
-    if not radio_metadata:
-        print(f"season={season_year}: no team radio in the {len(sessions_to_process)} session(s) processed this run.")
-        return
-
-    for m in radio_metadata:
-        # session_key:driver_number:date is descriptive but not guaranteed
-        # unique on its own — two radio calls could share a timestamp at
-        # OpenF1's reported precision. recording_url is guaranteed unique
-        # (each clip is a distinct file), so fold a short hash of it in too.
-        url_hash = hashlib.sha1(m["recording_url"].encode()).hexdigest()[:8]
-        m["radio_message_id"] = f"{m['session_key']}:{m['driver_number']}:{m['date']}:{url_hash}"
-        # OpenF1 dates are ISO 8601 strings; Spark's TimestampType schema
-        # needs actual datetime objects, not strings, to convert cleanly.
-        m["message_date"] = datetime.fromisoformat(m.pop("date").replace("Z", "+00:00"))
-
-    metadata_rows = [
-        {k: m.get(k) for k in RADIO_METADATA_SCHEMA.fieldNames()} for m in radio_metadata
-    ]
-    metadata_df = spark.createDataFrame(metadata_rows, schema=RADIO_METADATA_SCHEMA)
-
-    # Repartition so each partition gets a manageable, roughly even batch of
-    # clips to download+transcribe; too many partitions wastes model-load
-    # time, too few serializes the run onto a handful of executors.
-    num_partitions = max(1, min(32, len(metadata_rows) // 10 or 1))
-    transcribed_rdd = metadata_df.repartition(num_partitions).rdd.mapPartitions(transcribe_partition)
-    transcripts_df = spark.createDataFrame(transcribed_rdd, schema=TRANSCRIPT_SCHEMA)
-    new_rows_df = (
-        transcripts_df
-        .withColumn("topic_id", F.lit(None).cast(IntegerType()))
-        .withColumn("topic_probability", F.lit(None).cast(DoubleType()))
-    )
-    new_rows_df.cache()
-    n_new_messages = new_rows_df.count()
-
-    # Land this run's transcripts first (topic assignment filled in below).
-    # For a fresh fit this also makes them visible to the "read the whole
-    # corpus back" query that follows.
-    write_new_messages(spark, new_rows_df, messages_table)
 
     from sentence_transformers import SentenceTransformer
     embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)

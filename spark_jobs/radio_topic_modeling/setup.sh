@@ -204,8 +204,13 @@ aws ecr set-repository-policy --repository-name "$REPO_NAME" --policy-text file:
 # Rebuilding/pushing the same tag just overwrites it — safe every time.
 # --platform is pinned explicitly (not left to whatever the build host's
 # native architecture happens to be) to match $EMR_ARCHITECTURE above.
+# --build-arg WHISPER_MODEL_SIZE bakes in the matching model weights --
+# defaults to the Dockerfile's own ARG default if .env predates this
+# variable, so an older .env doesn't break this build.
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-docker build --platform "$DOCKER_PLATFORM" -t "$IMAGE" .
+docker build --platform "$DOCKER_PLATFORM" \
+    --build-arg WHISPER_MODEL_SIZE="${WHISPER_MODEL_SIZE:-medium}" \
+    -t "$IMAGE" .
 docker push "$IMAGE"
 
 # 5. EMR Serverless application, wired to the VPC's public subnet and the

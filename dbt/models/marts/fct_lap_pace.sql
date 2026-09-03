@@ -44,4 +44,6 @@ join lap_stats ls
     on l.session_key = ls.session_key
     and l.lap_number = ls.lap_number
 left join {{ ref('dim_sessions') }} se on l.session_key = se.session_key
-left join {{ ref('dim_drivers') }} d on l.driver_number = d.driver_number
+left join {{ ref('dim_drivers') }} d
+    on l.driver_number = d.driver_number
+    and l.session_key = d.session_key
