@@ -283,8 +283,20 @@ def transcribe_partition(rows):
             # for quiet/noisy audio specifically. A wrong-but-plausible
             # transcript is worse for topic modeling than an English
             # transcript that's merely poor.
+            # Some "radio calls" run minutes long with mostly dead air (a
+            # channel left open post-race, say) — without vad_filter,
+            # Whisper has to decode that silence as if it were speech, and
+            # it reliably resolves that into the same sentence hallucinated
+            # over and over rather than recognizing there's nothing there.
+            # condition_on_previous_text=False stops that loop from feeding
+            # on its own prior (wrong) output once it starts, and costs
+            # nothing here since each clip is an independent utterance with
+            # no real cross-segment context to lose. Confirmed against a
+            # real 191s clip that decoded as 7x the same sentence without
+            # this and as varied, coherent speech with it.
             segments, info = model.transcribe(
-                audio_buf, beam_size=5, language="en", initial_prompt=WHISPER_INITIAL_PROMPT
+                audio_buf, beam_size=5, language="en", initial_prompt=WHISPER_INITIAL_PROMPT,
+                vad_filter=True, condition_on_previous_text=False,
             )
             text = " ".join(seg.text.strip() for seg in segments).strip()
             d["transcript_text"] = text or None
