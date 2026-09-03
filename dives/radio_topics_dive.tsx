@@ -157,7 +157,7 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
   const entitiesQ = useSQLQuery(
     `
       select distinct
-        ${groupBy === "driver" ? "driver_acronym as entity, team_colour as color" : "team_name as entity, team_colour as color"}
+        ${groupBy === "driver" ? "driver_acronym as entity" : "team_name as entity"}
       from ${FCT_DRIVER_TOPIC_RACE}
       ${whereClause(seasonFilter(season))}
       order by entity
@@ -260,7 +260,15 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
         <ResponsiveContainer width="100%" height={340}>
           <BarChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-            <XAxis dataKey="race" fontSize={11} interval={0} angle={-30} textAnchor="end" height={70} />
+            <XAxis
+              dataKey="race"
+              fontSize={11}
+              interval={0}
+              angle={-30}
+              textAnchor="end"
+              height={80}
+              tickMargin={12}
+            />
             <YAxis fontSize={11} label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }} />
             <Tooltip />
             <Legend wrapperStyle={{ fontSize: 11 }} />
