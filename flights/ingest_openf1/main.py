@@ -1,13 +1,14 @@
-"""MotherDuck Flight: ingest OpenF1 Race-session data for a season into f1.raw.*
+"""MotherDuck Flight: ingest OpenF1 session/meeting/driver/lap data for a
+season into f1.raw.*
 
 Idempotent: re-running (whether on schedule or on demand) deletes and
 re-inserts rows for every session refreshed this run, so corrections
 published upstream by OpenF1 are picked up and no duplicates accumulate.
 
-Drivers/laps fetching is incremental (see `needs_lap_refresh`): a session
-that already has laps stored and finished more than RECENCY_WINDOW ago is
+Drivers/laps fetching is incremental (see `needs_refresh`): a session that
+already has the data stored and finished more than RECENCY_WINDOW ago is
 treated as final and skipped, so a run doesn't re-pull the whole season's
-lap data every time — only new, upcoming, or recently-finished sessions.
+data every time — only new, upcoming, or recently-finished sessions.
 """
 import json
 import os
@@ -29,6 +30,11 @@ INTER_REQUEST_SLEEP_SEC = 0.5
 # than the weekly schedule so every session gets re-checked at least once
 # after it actually happens before being considered final.
 RECENCY_WINDOW = timedelta(days=7)
+# Kept in sync with spark_jobs/radio_topic_modeling/job.py's
+# TARGET_SESSION_NAMES: that job transcribes radio for these session types,
+# and needs dim_sessions/dim_drivers (sourced from here) to actually have
+# session/meeting/driver metadata for them, not just for Race.
+TARGET_SESSION_NAMES = {"Race", "Qualifying", "Sprint"}
 
 
 def fetch(endpoint, params):
@@ -111,25 +117,26 @@ def load_table(con, tmp_path, records, table, key_columns, key_values):
     return len(records)
 
 
-def sessions_with_laps(con):
-    """session_keys that already have at least one row in f1.raw.laps."""
+def sessions_with_rows(con, table):
+    """session_keys that already have at least one row in f1.raw.<table>."""
     table_exists = con.execute(
         "SELECT count(*) FROM information_schema.tables "
-        "WHERE table_catalog = 'f1' AND table_schema = 'raw' AND table_name = 'laps'"
+        "WHERE table_catalog = 'f1' AND table_schema = 'raw' AND table_name = ?",
+        [table],
     ).fetchone()[0] > 0
     if not table_exists:
         return set()
     return {
         row[0]
-        for row in con.execute("SELECT DISTINCT session_key FROM f1.raw.laps").fetchall()
+        for row in con.execute(f"SELECT DISTINCT session_key FROM f1.raw.{table}").fetchall()
     }
 
 
-def needs_lap_refresh(session, already_have_laps, now):
+def needs_refresh(session, already_have, now):
     """Worth (re-)fetching drivers/laps for this session if we don't have any
-    laps for it yet, or it's within RECENCY_WINDOW of now (upcoming/in
+    rows for it yet, or it's within RECENCY_WINDOW of now (upcoming/in
     progress, or recently finished and might still get corrections)."""
-    if session["session_key"] not in already_have_laps:
+    if session["session_key"] not in already_have:
         return True
     date_end = session.get("date_end")
     if not date_end:
@@ -138,22 +145,31 @@ def needs_lap_refresh(session, already_have_laps, now):
     return abs(now - finished_at) <= RECENCY_WINDOW
 
 
+def refresh_keys_for(con, table, candidate_sessions, now):
+    """session_keys among `candidate_sessions` worth (re-)fetching fresh
+    f1.raw.<table> data for."""
+    already_have = sessions_with_rows(con, table)
+    return [s["session_key"] for s in candidate_sessions if needs_refresh(s, already_have, now)]
+
+
 def main():
     season_year = os.environ.get("SEASON_YEAR", "2026")
 
-    all_race_type_sessions = fetch("sessions", {"year": season_year, "session_type": "Race"})
-    # OpenF1 tags Sprint sessions with session_type=Race too; keep full-length
-    # Race sessions only, per the "Race only" pace-comparison scope. Cancelled
-    # races have no laps data at all (OpenF1 404s the laps endpoint for them),
-    # so skip them too.
+    # No server-side session_type filter: Sprint shares session_type=Race
+    # with the Race session itself, and Qualifying is its own session_type,
+    # so session_name is the only field that actually distinguishes the
+    # sessions we want from practice/testing/Sprint Qualifying noise.
+    all_sessions = fetch("sessions", {"year": season_year})
+    # Cancelled sessions have no laps/drivers data at all (OpenF1 404s those
+    # endpoints for them), so skip them too.
     sessions = [
         s
-        for s in all_race_type_sessions
-        if s.get("session_name") == "Race" and not s.get("is_cancelled")
+        for s in all_sessions
+        if s.get("session_name") in TARGET_SESSION_NAMES and not s.get("is_cancelled")
     ]
 
     if not sessions:
-        print(f"No Race sessions found for season {season_year}; nothing to do.")
+        print(f"No target sessions found for season {season_year}; nothing to do.")
         return
 
     session_keys = [s["session_key"] for s in sessions]
@@ -163,17 +179,26 @@ def main():
     meetings = [m for m in all_meetings if m["meeting_key"] in set(meeting_keys)]
 
     con = duckdb.connect("md:")
-
-    already_have_laps = sessions_with_laps(con)
     now = datetime.now(timezone.utc)
-    refresh_sessions = [s for s in sessions if needs_lap_refresh(s, already_have_laps, now)]
-    refresh_keys = [s["session_key"] for s in refresh_sessions]
+
+    # Drivers and laps both matter for every target session type now -- a
+    # Qualifying or Sprint radio message needs driver_number -> name/team
+    # just as much as a Race one does, and fct_radio_messages needs a lap
+    # number for those sessions too. Each table still gets its own
+    # incremental refresh (a session can need one refreshed without the
+    # other), but both draw from the same candidate pool. Race-only scoping
+    # for lap-pace comparison (fct_lap_pace / the Relative Lap Pace dive) is
+    # enforced in that mart itself, not here -- see fct_lap_pace.sql.
+    driver_refresh_keys = refresh_keys_for(con, "drivers", sessions, now)
+    lap_refresh_keys = refresh_keys_for(con, "laps", sessions, now)
 
     drivers = []
-    laps = []
-    for session_key in refresh_keys:
+    for session_key in driver_refresh_keys:
         drivers.extend(fetch("drivers", {"session_key": session_key}))
         time.sleep(INTER_REQUEST_SLEEP_SEC)
+
+    laps = []
+    for session_key in lap_refresh_keys:
         laps.extend(fetch("laps", {"session_key": session_key}))
         time.sleep(INTER_REQUEST_SLEEP_SEC)
 
@@ -184,16 +209,17 @@ def main():
         con, "/tmp/sessions.json", sessions, "sessions", ["session_key"], session_keys
     )
     n_drivers = load_table(
-        con, "/tmp/drivers.json", drivers, "drivers", ["session_key"], refresh_keys
+        con, "/tmp/drivers.json", drivers, "drivers", ["session_key"], driver_refresh_keys
     )
     n_laps = load_table(
-        con, "/tmp/laps.json", laps, "laps", ["session_key"], refresh_keys
+        con, "/tmp/laps.json", laps, "laps", ["session_key"], lap_refresh_keys
     )
 
     print(
         f"season={season_year} sessions={n_sessions} meetings={n_meetings} "
         f"drivers={n_drivers} laps={n_laps} "
-        f"refreshed={len(refresh_keys)}/{len(session_keys)} sessions"
+        f"drivers_refreshed={len(driver_refresh_keys)}/{len(session_keys)} "
+        f"laps_refreshed={len(lap_refresh_keys)}/{len(session_keys)} sessions"
     )
 
 

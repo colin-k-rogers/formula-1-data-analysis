@@ -32,17 +32,30 @@ const PALETTE = ["#0777b3", "#bd4e35", "#2d7a00", "#e18727", "#638CAD", "#8e44ad
 const OTHER_COLOR = "#adadad";
 const TOP_N_TOPICS = 6;
 
-function raceLabel(row: Record<string, unknown>): string {
-  return `${String(row.circuit_short_name)} — ${String(row.session_date).slice(0, 10)}`;
+// Short suffix distinguishing same-weekend sessions (a circuit can now have
+// up to three: Qualifying, Sprint, and Race all show radio traffic). "Race"
+// gets no suffix since it's still the common case and the plain circuit
+// label should keep meaning "the race" wherever only Race data exists.
+function sessionSuffix(sessionName: unknown): string {
+  if (sessionName == null) return "";
+  const name = String(sessionName);
+  if (name === "Race") return "";
+  if (name === "Qualifying") return " (Q)";
+  if (name === "Sprint") return " (S)";
+  return ` (${name})`;
 }
 
-// Circuit name only, no date — used for the chart's x-axis, where
-// raceLabel's full "circuit — date" text was long enough (especially
+function raceLabel(row: Record<string, unknown>): string {
+  return `${String(row.circuit_short_name)}${sessionSuffix(row.session_name)} — ${String(row.session_date).slice(0, 10)}`;
+}
+
+// Circuit + short session suffix, no date — used for the chart's x-axis,
+// where raceLabel's full "circuit — date" text was long enough (especially
 // rotated) to run over into the plotted bars. The session dropdown still
 // uses raceLabel: there's no rotation/overflow issue there, and the date
-// helps distinguish same-circuit races across seasons when "All" is picked.
+// helps distinguish same-circuit sessions across seasons when "All" is picked.
 function chartRaceLabel(row: Record<string, unknown>): string {
-  return String(row.circuit_short_name);
+  return `${String(row.circuit_short_name)}${sessionSuffix(row.session_name)}`;
 }
 
 // A specific year, the "all" sentinel (no year filter), or null while the
@@ -138,7 +151,7 @@ export default function RadioTopicsDive() {
             color: view === "race" ? "#fff" : "#6a6a6a",
           }}
         >
-          Race detail
+          Session detail
         </button>
       </div>
 
@@ -186,6 +199,7 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
       select
         session_key,
         circuit_short_name,
+        session_name,
         session_date,
         topic_label,
         sum(message_count) as message_count
@@ -196,7 +210,7 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
           ? ""
           : `${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'`,
       )}
-      group by 1, 2, 3, 4
+      group by 1, 2, 3, 4, 5
       order by session_date
     `,
     { enabled: season != null && (groupBy === "all" || effectiveEntity != null) },
@@ -324,7 +338,7 @@ function buildStackedSeries(rows: Record<string, unknown>[]) {
 function RaceTopicsDetail({ season }: { season: Season }) {
   const sessionsQ = useSQLQuery(
     `
-      select distinct session_key, circuit_short_name, session_date
+      select distinct session_key, circuit_short_name, session_name, session_date
       from ${FCT_DRIVER_TOPIC_RACE}
       ${whereClause(seasonFilter(season))}
       order by session_date
