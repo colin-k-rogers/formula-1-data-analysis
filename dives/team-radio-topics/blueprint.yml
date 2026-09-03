@@ -1,0 +1,23 @@
+schemaVersion: 1
+name: team-radio-topics
+title: Team Radio Topics
+description: >-
+  How drivers and teams' team-radio topics (transcribed with Whisper,
+  topic-modeled with BERTopic) evolve across the season, with a topic-over-
+  season view, a race-level breakdown, and message list.
+
+resources:
+  dives:
+    dashboard:
+      title: Team Radio Topics
+      source: src/dive.tsx
+      description: >-
+        How drivers and teams' team-radio topics (transcribed with Whisper,
+        topic-modeled with BERTopic) evolve across the season, with a
+        topic-over-season view, a race-level breakdown, and message list.
+      requiredResources:
+        - url: md:f1
+          alias: f1
+      targets:
+        preview:
+          title: Team Radio Topics:${target.branch} (Preview)

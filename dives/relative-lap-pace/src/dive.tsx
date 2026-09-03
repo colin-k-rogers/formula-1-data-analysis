@@ -13,6 +13,10 @@ import {
 } from "recharts";
 import { Loader2 } from "lucide-react";
 
+export const REQUIRED_DATABASES = [
+  { type: "database", path: "md:f1", alias: "f1" },
+];
+
 const N = (v: unknown): number => (v != null ? Number(v) : 0);
 
 function formatLapTime(seconds: number): string {

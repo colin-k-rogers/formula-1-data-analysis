@@ -100,7 +100,7 @@ REPROCESS_ALL = os.environ.get("REPROCESS_ALL", "false").lower() == "true"
 
 
 def fetch(endpoint, params):
-    """GET with retries; mirrors flights/ingest_openf1/main.py's fetch(). A
+    """GET with retries; mirrors flights/ingest-openf1/main.py's fetch(). A
     404 means OpenF1 has no rows for these params (e.g. team radio for a
     session that never happened) — treat that as an empty result rather
     than an error to retry into the ground."""

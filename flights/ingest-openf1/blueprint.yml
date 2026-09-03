@@ -1,0 +1,31 @@
+schemaVersion: 1
+name: ingest-openf1
+title: Ingest OpenF1
+description: >-
+  Pulls the season's Race/Qualifying/Sprint sessions, meetings, drivers, and
+  laps from the OpenF1 API into f1.raw.*. Idempotent (delete+re-insert per
+  refreshed session), so it also picks up corrections OpenF1 publishes after
+  the fact.
+
+variables:
+  season_year:
+    description: F1 season to ingest.
+    default: "2026"
+
+resources:
+  flights:
+    ingest:
+      name: f1-ingest-openf1
+      source: main.py
+      requirements: requirements.txt
+      scheduleCron: 0 6 * * 2
+      maxRuntimeSec: 1800
+      # Never auto-run on deploy: this hits the OpenF1 API and writes to
+      # f1.raw.*. It already runs on its own weekly schedule.
+      runOnDeploy: false
+      config:
+        SEASON_YEAR: ${var.season_year}
+      targets:
+        preview:
+          name: f1-ingest-openf1:${target.branch} (Preview)
+          scheduleCron: ""

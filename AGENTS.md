@@ -1,8 +1,18 @@
 # Agent notes
 
-- Keep this repo and the deployed MotherDuck Flights in sync. Every Flight under
-  `flights/<name>/` (`main.py`, `requirements.txt`) should match what's actually
-  deployed via `create_flight`/`update_flight`/`edit_flight_source`. When you
-  change one, change the other in the same session: edit the deployed Flight
-  and commit the matching file(s) here, or vice versa. Don't let the repo copy
-  drift into documentation-only status.
+- Flights (`flights/<name>/`) and Dives (`dives/<name>/`) are [MotherDuck
+  Blueprint](https://github.com/motherduckdb/motherduck-blueprints) packages,
+  each with a `blueprint.yml` next to its source (`main.py`/`requirements.txt`
+  for a Flight, `src/dive.tsx` for a Dive). Merging a change under `flights/**`
+  or `dives/**` to `main` deploys it automatically via
+  [.github/workflows/deploy_blueprints.yaml](.github/workflows/deploy_blueprints.yaml)
+  — see the README's "Automated deploys" section.
+- Because deploys are one-directional (git → MotherDuck), don't edit a
+  deployed Flight or Dive directly (`update_flight`/`edit_flight_source`,
+  `MD_UPDATE_DIVE_CONTENT`, the MotherDuck UI, etc.) without also committing
+  the matching change here in the same session — a direct edit that isn't
+  committed will get silently overwritten by the next merge to `main` that
+  touches that package. If you ever do need to inspect what's actually live
+  (e.g. to check for drift), use `get_flight`/`read_dive` and reconcile any
+  difference into the repo file rather than assuming the repo copy is
+  current.

@@ -1,0 +1,23 @@
+schemaVersion: 1
+name: relative-lap-pace
+title: Relative Lap Pace
+description: >-
+  Season leaderboard and per-race lap-by-lap pace comparison for F1 Race
+  sessions, based on each driver's lap time relative to the fastest lap of
+  the field on that same lap.
+
+resources:
+  dives:
+    dashboard:
+      title: Relative Lap Pace
+      source: src/dive.tsx
+      description: >-
+        Season leaderboard and per-race lap-by-lap pace comparison for F1
+        Race sessions, based on each driver's lap time relative to the
+        fastest lap of the field on that same lap.
+      requiredResources:
+        - url: md:f1
+          alias: f1
+      targets:
+        preview:
+          title: Relative Lap Pace:${target.branch} (Preview)

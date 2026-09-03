@@ -1,0 +1,25 @@
+schemaVersion: 1
+name: race-pace-email
+title: Race Pace Email
+description: >-
+  On-demand Flight that emails the Relative Lap Pace dive's race-detail data
+  (header, driver avg lap time / cumulative gap-to-fastest table, top-5
+  gap-to-fastest chart) for the most recent Race session.
+
+resources:
+  flights:
+    email:
+      name: f1-race-pace-email
+      source: main.py
+      requirements: requirements.txt
+      # On-demand only — no scheduleCron.
+      maxRuntimeSec: 300
+      # Never auto-run on deploy: this sends a real email. Trigger it
+      # explicitly (MD_RUN_FLIGHT) when you actually want a summary sent.
+      runOnDeploy: false
+      secrets:
+        - gmail_smtp
+        - email_recipient
+      targets:
+        preview:
+          name: f1-race-pace-email:${target.branch} (Preview)

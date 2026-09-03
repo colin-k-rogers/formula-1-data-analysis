@@ -1,0 +1,24 @@
+schemaVersion: 1
+name: transform-dbt
+title: Transform dbt
+description: >-
+  Runs `dbt build` against md:f1 using the dbt/ project in this repo. Fetches
+  dbt/ straight from GitHub (a tarball of GITHUB_REF, default "main") at build
+  time, so edits under dbt/ take effect on the next run without redeploying
+  this Flight.
+
+resources:
+  flights:
+    transform:
+      name: f1-transform-dbt
+      source: main.py
+      requirements: requirements.txt
+      scheduleCron: 30 6 * * 2
+      maxRuntimeSec: 1800
+      # Never auto-run on deploy: it writes to f1.marts.*. It already runs on
+      # its own weekly schedule, 30 minutes after the ingest Flight.
+      runOnDeploy: false
+      targets:
+        preview:
+          name: f1-transform-dbt:${target.branch} (Preview)
+          scheduleCron: ""
