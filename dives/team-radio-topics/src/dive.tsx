@@ -26,9 +26,17 @@ const N = (v: unknown): number => (v != null ? Number(v) : 0);
 const FCT_DRIVER_TOPIC_RACE = '"f1"."marts"."fct_driver_topic_race"';
 const FCT_RADIO_MESSAGES = '"f1"."marts"."fct_radio_messages"';
 
-const PALETTE = ["#0777b3", "#bd4e35", "#2d7a00", "#e18727", "#638CAD", "#8e44ad"];
+// Sized to TOP_N_SERIES + OTHER_BUCKET_SLACK so every series shown without an
+// "Other" bucket (see buildStackedSeries) still gets its own color instead of
+// the palette wrapping around and reusing one.
+const PALETTE = ["#0777b3", "#bd4e35", "#2d7a00", "#e18727", "#638CAD", "#8e44ad", "#c2185b", "#00897b"];
 const OTHER_COLOR = "#adadad";
 const TOP_N_SERIES = 6;
+// Folding a mere handful of leftover series into "Other" doesn't actually
+// simplify the chart -- it just swaps one small series' real label for an
+// equally-small "Other" one. Only bucket once the long tail is more than
+// this many series deep; otherwise show everything.
+const OTHER_BUCKET_SLACK = 2;
 
 // Short suffix distinguishing same-weekend sessions (a circuit can now have
 // up to three: Qualifying, Sprint, and Race all show radio traffic). "Race"
@@ -293,7 +301,11 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
 
 /** Pivots long rows (one per race x series) into one row per race with a
  * column per series, keeping only the top N series by total volume across
- * the season and folding the rest into "Other" so the chart stays readable.
+ * the season and folding the rest into "Other" so the chart stays readable —
+ * unless there are only a handful more than TOP_N_SERIES (see
+ * OTHER_BUCKET_SLACK), in which case it's fine to just show them all instead
+ * of bucketing a small remainder behind an "Other" that's no simpler than
+ * showing it directly.
  * `seriesKey` picks the pivot dimension out of each row — a topic label when
  * charting one entity's topic mix, or a team/driver name when charting one
  * topic's spread across the field. */
@@ -306,12 +318,13 @@ function buildStackedSeries(
     const key = seriesKey(r);
     totalsBySeries.set(key, (totalsBySeries.get(key) ?? 0) + N(r.message_count));
   }
-  const topSeries = [...totalsBySeries.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, TOP_N_SERIES)
-    .map(([key]) => key);
+  const sortedSeries = [...totalsBySeries.entries()].sort((a, b) => b[1] - a[1]);
+  const showAllSeries = sortedSeries.length <= TOP_N_SERIES + OTHER_BUCKET_SLACK;
+  const topSeries = (showAllSeries ? sortedSeries : sortedSeries.slice(0, TOP_N_SERIES)).map(
+    ([key]) => key,
+  );
   const topSeriesSet = new Set(topSeries);
-  const hasOther = totalsBySeries.size > topSeries.length;
+  const hasOther = !showAllSeries;
 
   const byRace = new Map<number, Record<string, unknown>>();
   for (const r of rows) {
