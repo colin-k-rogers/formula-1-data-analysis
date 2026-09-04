@@ -33,3 +33,43 @@ Flight schedule:
 2. **[warehouse/setup_radio_lakehouse.sql](warehouse/setup_radio_lakehouse.sql)** is a one-time (not scheduled) script that attaches that Glue catalog into MotherDuck as the `radio_lakehouse` database via `CREATE SECRET` + `CREATE DATABASE ... TYPE ICEBERG ENDPOINT_TYPE 'glue'`. Once run, the attachment persists across every session and Flight — no copy-into-`f1.raw` step is needed.
 3. The same **`f1-transform-dbt`** Flight and [dbt](dbt) project stage `radio_lakehouse.raw.*` (see `models/sources.yml`) into `dim_radio_topics`, `fct_radio_messages` (each radio call joined to its driver, session, and in-progress lap), and `fct_driver_topic_race` (driver × session × topic message counts — the grain the Dive below charts).
 4. **[dives/radio_topics_dive.tsx](dives/radio_topics_dive.tsx)** is a Dive with three views: season evolution (stacked chart of a driver's or team's topic mix race-by-race), topic over season (stacked chart of one topic's volume race-by-race, broken down by team or driver), and race detail (topic breakdown plus the underlying radio messages for one session). As with `season_pace_dive.tsx`, only one Dive source can be live in `.dive-preview/src/dive.tsx` at a time — copy in whichever one you're previewing.
+
+### Running the whole radio pipeline in one go
+
+Steps 1 and 3 above are two different systems on two different triggers —
+`./run.sh` at a terminal for the Spark job, then the weekly `f1-transform-dbt`
+Flight (or a manual run of it) for the dbt side — which means picking up a race
+weekend's radio takes a human watching the first finish before starting the
+second.
+
+**`f1-radio-topics-pipeline`** ([flights/radio_topics_pipeline](flights/radio_topics_pipeline))
+is an on-demand Flight that does all of it in one run: it submits the EMR
+Serverless job run and blocks until it reaches `SUCCESS` (aborting before dbt if
+it fails, so marts never get built on a half-written Iceberg table), then runs
+`dbt build` selecting only the radio lineage — `stg_radio__messages+
+stg_radio__topics+ topic_name_overrides+`, i.e. everything downstream of what
+the Spark job just wrote, leaving the OpenF1 models to their own Tuesday
+schedule — and finally reports the session and message counts now in
+`fct_driver_topic_race`. There's nothing to "refresh" on the Dive itself: Dives
+query live data on every render, so it's current the moment dbt commits; that
+last step exists to prove a green run actually put new radio on the dashboard.
+
+It needs two things the other Flights don't:
+
+- **A `aws_emr` Flight secret** (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+  for an IAM user that can submit job runs.
+  [warehouse/setup_flight_submitter_iam_user.sh](warehouse/setup_flight_submitter_iam_user.sh)
+  creates that user, scoped to `StartJobRun`/`GetJobRun` on this one application
+  plus `PassRole` of the job runtime role to EMR Serverless and nothing else.
+  It's separate from the read-only Glue/S3 user in `setup_iam_user.sh`, which
+  deliberately can't start anything.
+- **Config matching your `.env`/`state.sh`**: `EMR_APPLICATION_ID` (required),
+  plus `AWS_REGION`, `BUCKET_NAME`, `CATALOG_NAME`, `SEASON_YEAR`, and
+  `WHISPER_MODEL_SIZE`. `EMR_EXECUTION_ROLE_ARN` is derived from the caller's own
+  account via STS unless you set it.
+
+`run.sh`'s three escape hatches work here too, as one-off run config overrides
+rather than stored config: `FORCE_REFIT`, `REPROCESS_SESSIONS`, `REPROCESS_ALL`.
+The spark-submit parameters the Flight builds mirror `run.sh`'s — change one,
+change the other. `run.sh` itself stays the right tool for iterating on the
+Spark job alone.
