@@ -390,12 +390,13 @@ function TopicOverSeason({ season }: { season: Season }) {
       select
         session_key,
         circuit_short_name,
+        session_name,
         session_date,
         ${breakdown === "total" ? "'Messages'" : breakdown === "team" ? "team_name" : "driver_acronym"} as entity,
         sum(message_count) as message_count
       from ${FCT_DRIVER_TOPIC_RACE}
       ${whereClause(seasonFilter(season), `topic_label = '${effectiveTopic}'`)}
-      group by 1, 2, 3, 4
+      group by 1, 2, 3, 4, 5
       order by session_date
     `,
     { enabled: season != null && effectiveTopic != null },
