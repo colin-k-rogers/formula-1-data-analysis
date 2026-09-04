@@ -1,0 +1,45 @@
+schemaVersion: 1
+requiredCliVersion: ">=0.4.0"
+repository:
+  name: formula-1-data-analysis
+
+include:
+  - flights/**/blueprint.yml
+  - dives/**/blueprint.yml
+
+variables:
+  preview_suffix:
+    description: Branch-scoped suffix for preview data resources.
+    default: _preview_${target.branch_slug}
+  # Single source of truth for the current F1 season, so ingest-openf1 and
+  # radio-topics-pipeline can't drift onto different seasons — bump this one
+  # value at rollover instead of each package's own copy.
+  season_year:
+    description: F1 season the OpenF1/radio Flights process.
+    default: "2026"
+
+targets:
+  preview:
+    mode: preview
+    default: true
+    deployment:
+      tokenEnvVar: MOTHERDUCK_TOKEN
+      identity: GitHub Actions preview service account
+    policies:
+      disableSchedules: true
+      cleanup: true
+      requireBranchSlugInDataResources: true
+    variables:
+      share_visibility: HIDDEN
+
+  prod:
+    mode: production
+    environment: motherduck-production
+    deployment:
+      tokenEnvVar: MOTHERDUCK_TOKEN
+      identity: GitHub Actions production service account
+    policies:
+      serviceAccountRecommended: true
+    variables:
+      preview_suffix: ""
+      share_visibility: DISCOVERABLE
