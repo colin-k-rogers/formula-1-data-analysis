@@ -4,6 +4,8 @@
 import { useMemo } from "react";
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
 import {
+  Bar,
+  BarChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -84,7 +86,10 @@ function whereClause(...conditions: string[]): string {
 }
 
 export default function RadioTopicsDive() {
-  const [view, setView] = useDiveState<"season" | "topic" | "race">("view", "season");
+  const [view, setView] = useDiveState<"season" | "topic" | "race" | "distribution">(
+    "view",
+    "season",
+  );
 
   const seasonsQ = useSQLQuery(`
     select distinct year from ${FCT_DRIVER_TOPIC_RACE} order by year desc
@@ -169,12 +174,24 @@ export default function RadioTopicsDive() {
         >
           Session detail
         </button>
+        <button
+          onClick={() => setView("distribution")}
+          className="text-sm px-3 py-1 rounded"
+          style={{
+            background: view === "distribution" ? "#0777b3" : "transparent",
+            color: view === "distribution" ? "#fff" : "#6a6a6a",
+          }}
+        >
+          Topic distribution
+        </button>
       </div>
 
       {view === "race" ? (
         <RaceTopicsDetail season={effectiveSeason} />
       ) : view === "topic" ? (
         <TopicOverSeason season={effectiveSeason} />
+      ) : view === "distribution" ? (
+        <TopicDistribution season={effectiveSeason} />
       ) : (
         <SeasonTopicsEvolution season={effectiveSeason} />
       )}
@@ -343,10 +360,11 @@ function buildStackedSeries(
   return { chartData, series };
 }
 
-/** Splits sorted chartData into one array per season (by the `year` every
- * row carries), oldest season first — used to render one mini chart per
- * season instead of a single chart with every season's races crammed onto
- * one x-axis. */
+/** Splits rows into one array per season (by the `year` every row carries),
+ * oldest season first — used to render one mini chart per season instead of
+ * a single chart with every season crammed onto one x-axis, whether that's
+ * a stacked-series chart with every season's races on it or (as in
+ * TopicDistribution) a per-season bar chart. */
 function groupBySeasonYear(
   chartData: Record<string, unknown>[],
 ): { year: number; data: Record<string, unknown>[] }[] {
@@ -583,6 +601,102 @@ function TopicOverSeason({ season }: { season: Season }) {
         </>
       )}
     </div>
+  );
+}
+
+/** Every topic's message volume for a season, shown as its own bar —
+ * deliberately bypassing buildStackedSeries's top-N-plus-"Other" bucketing.
+ * Where the other tabs chart a handful of series over time and fold a long
+ * tail away so the chart stays readable, this tab's whole point is that long
+ * tail: how message volume is actually spread across every topic BERTopic
+ * has surfaced, sparse ones included. */
+function TopicDistribution({ season }: { season: Season }) {
+  const rowsQ = useSQLQuery(
+    `
+      select year, topic_label, sum(message_count) as message_count
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season))}
+      group by 1, 2
+      order by year, message_count desc
+    `,
+    { enabled: season != null },
+  );
+  const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
+
+  // Reuses groupBySeasonYear's year-bucketing (these rows already carry a
+  // `year` column), then sorts each season's topics by volume so the busiest
+  // topic renders first regardless of the query's own row order.
+  const bySeason = useMemo(
+    () =>
+      groupBySeasonYear(rows).map(({ year, data }) => ({
+        year,
+        data: [...data].sort((a, b) => N(b.message_count) - N(a.message_count)),
+      })),
+    [rows],
+  );
+
+  return (
+    <div>
+      <p className="text-sm mb-4" style={{ color: "#6a6a6a" }}>
+        Every topic's share of radio traffic, topic by topic — no "Other" bucket, so a season's
+        long tail of sparse topics stays visible instead of being folded away.
+      </p>
+      {rowsQ.isLoading ? (
+        <div className="flex items-center gap-2" style={{ color: "#6a6a6a", height: 320 }}>
+          <Loader2 className="animate-spin" size={16} /> Loading topic distribution…
+        </div>
+      ) : rowsQ.isError ? (
+        <p style={{ color: "#bc1200" }}>Failed to load: {rowsQ.error?.message}</p>
+      ) : bySeason.length === 0 ? (
+        <p style={{ color: "#6a6a6a" }}>No radio messages found.</p>
+      ) : (
+        <div className="space-y-8">
+          {bySeason.map(({ year, data }) => {
+            const totalMessages = data.reduce((sum, r) => sum + N(r.message_count), 0);
+            return (
+              <div key={year}>
+                <h3 className="text-xs font-semibold mb-1" style={{ color: "#231f20" }}>
+                  {year} — {data.length} topics, {totalMessages} messages
+                </h3>
+                <TopicDistributionChart data={data} height={season === "all" ? 260 : 380} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TopicDistributionChart({
+  data,
+  height,
+}: {
+  data: Record<string, unknown>[];
+  height: number;
+}) {
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={data}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+        <XAxis
+          dataKey="topic_label"
+          fontSize={11}
+          interval={0}
+          angle={-30}
+          textAnchor="end"
+          height={100}
+          tickMargin={12}
+        />
+        <YAxis
+          fontSize={11}
+          allowDecimals={false}
+          label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }}
+        />
+        <Tooltip />
+        <Bar dataKey="message_count" name="Radio messages" fill={PALETTE[0]} radius={[2, 2, 0, 0]} />
+      </BarChart>
+    </ResponsiveContainer>
   );
 }
 
