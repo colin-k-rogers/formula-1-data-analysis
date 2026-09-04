@@ -1,52 +1,12 @@
 """MotherDuck Flight: run the whole radio-topics pipeline end to end.
 
-The radio-topics stack is three stages that have to happen in order, and
-until now only the middle one lived in MotherDuck. This Flight chains all
-three so a race weekend's radio can be picked up with a single run:
+Submits the EMR Serverless job run (spark_jobs/radio_topic_modeling), waits
+for it to succeed, builds the radio dbt lineage, then reports what the Dive
+can now show.
 
-1. Submit spark_jobs/radio_topic_modeling as an AWS EMR Serverless job run
-   (Whisper transcription + BERTopic, writing Iceberg tables into Glue) and
-   block until it reaches SUCCESS. A FAILED/CANCELLED job run, or one that
-   outlives POLL_TIMEOUT_SEC, aborts the Flight before dbt runs -- the
-   whole point of waiting is to not build marts on half-written data.
-2. `dbt build` only the radio lineage (see DBT_SELECT). The openf1 side of
-   the project (dim_drivers / dim_sessions / fct_laps, which
-   fct_radio_messages joins to) is left alone: it's owned by the
-   f1-ingest-openf1 + f1-transform-dbt pair on their own Tuesday schedule,
-   and rebuilding it here would do work this pipeline didn't invalidate.
-3. Report what the Dive will now see. Dives query live data -- there is no
-   dive-level refresh or cache to invalidate from outside the Dive -- so
-   the honest final step is verifying the marts
-   dives/radio_topics_dive.tsx reads actually moved, and logging the
-   sessions/messages now in them.
-
-Config (all non-secret, set on the Flight; every one has a default except
-EMR_APPLICATION_ID):
-
-  EMR_APPLICATION_ID     EMR Serverless application id (state.sh's APP_ID)
-  AWS_REGION             region the application lives in
-  EMR_EXECUTION_ROLE_ARN job runtime role; derived from the caller's own
-                         account via STS when left empty
-  BUCKET_NAME            S3 bucket holding the warehouse, logs, and model
-  CATALOG_NAME           Iceberg catalog name (must match job.py)
-  SEASON_YEAR            season to pull team radio for
-  WHISPER_MODEL_SIZE     must match the size baked into the container image
-  FORCE_REFIT            } the three escape hatches run.sh exposes; pass
-  REPROCESS_SESSIONS     } them as one-off run config overrides rather
-  REPROCESS_ALL          } than storing them on the Flight
-  POLL_INTERVAL_SEC      how often to poll the job run
-  POLL_TIMEOUT_SEC       give up waiting on the job run after this long
-  DBT_SELECT             dbt selector for stage 2
-  GITHUB_REF             repo ref to fetch the dbt project from
-
-Secret `aws_emr` supplies AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for an
-IAM user that can StartJobRun/GetJobRun on the application and PassRole the
-job runtime role -- see warehouse/setup_flight_submitter_iam_user.sh. This
-is deliberately *not* the radio_lakehouse_secret IAM user, which is
-read-only Glue/S3 and can't submit anything.
-
-The spark-submit parameters below mirror
-spark_jobs/radio_topic_modeling/run.sh. Change one, change the other.
+README.md's "Running the whole radio pipeline in one go" covers the setup,
+the config keys, the `aws_emr` secret, and why each stage is scoped the way
+it is. The spark-submit parameters below mirror run.sh's.
 """
 import io
 import os
@@ -65,11 +25,8 @@ FETCH_TIMEOUT_SEC = 30
 PROJECT_DIR = pathlib.Path("/tmp/dbt_project")
 SKIP_DIRS = {"target", "dbt_packages", "logs"}
 
-# Everything downstream of the two Iceberg sources the Spark job writes,
-# plus the seed dim_radio_topics overlays onto them. Expands to:
-# stg_radio__messages, stg_radio__topics, topic_name_overrides,
-# dim_radio_topics, fct_radio_messages, fct_driver_topic_race -- and the
-# tests attached to them.
+# Expands to both stg_radio__* views, the seed, dim_radio_topics,
+# fct_radio_messages, fct_driver_topic_race, and their tests.
 DEFAULT_DBT_SELECT = "stg_radio__messages+ stg_radio__topics+ topic_name_overrides+"
 
 ENTRY_POINT = "local:///opt/radio_topic_modeling/job.py"
@@ -89,11 +46,7 @@ def config(name, default=None):
 
 
 def submit_job_run(emr, application_id, role_arn):
-    """Start the EMR Serverless job run and return its id.
-
-    Keep the --conf list here in the same order as run.sh's so the two stay
-    diffable by eye.
-    """
+    """Start the EMR Serverless job run and return its id."""
     bucket = config("BUCKET_NAME", "f1-radio-topics-lakehouse")
     catalog = config("CATALOG_NAME", "radio")
     season_year = config("SEASON_YEAR", "2026")
@@ -108,9 +61,7 @@ def submit_job_run(emr, application_id, role_arn):
         f"--conf spark.emr-serverless.driverEnv.MODEL_STORE_PATH={model_store_path}",
         f"--conf spark.executorEnv.WHISPER_MODEL_SIZE={whisper_model_size}",
     ]
-    # The same three opt-in knobs run.sh forwards, and for the same reason:
-    # they're per-invocation decisions, so they only appear on the submit
-    # when actually set (here, as a one-off run config override).
+    # Per-invocation knobs: only sent when actually set.
     for knob in ("FORCE_REFIT", "REPROCESS_SESSIONS", "REPROCESS_ALL"):
         value = config(knob)
         if value:
@@ -129,8 +80,7 @@ def submit_job_run(emr, application_id, role_arn):
     response = emr.start_job_run(
         applicationId=application_id,
         executionRoleArn=role_arn,
-        # Unlike run.sh's unnamed submissions, tag these so a run started by
-        # this Flight is identifiable in the EMR Serverless console.
+        # Identifies Flight-started runs in the EMR Serverless console.
         name=f"f1-radio-topics-flight-{os.environ.get('MOTHERDUCK_FLIGHTS_RUN', 'adhoc')}",
         jobDriver={
             "sparkSubmit": {
@@ -150,9 +100,8 @@ def submit_job_run(emr, application_id, role_arn):
 def wait_for_job_run(emr, application_id, job_run_id):
     """Block until the job run is terminal; raise unless it SUCCESSed."""
     interval = int(config("POLL_INTERVAL_SEC", "30"))
-    # Default deliberately sits under the Flight's own max_runtime_sec
-    # (5400s) so a slow job run surfaces the message below instead of the
-    # Flight being killed mid-poll with nothing useful in the log.
+    # Sits under the Flight's own max_runtime_sec (5400s), so a slow job run
+    # raises below instead of the Flight being killed mid-poll.
     timeout = int(config("POLL_TIMEOUT_SEC", "4800"))
     deadline = time.monotonic() + timeout
 
@@ -167,9 +116,8 @@ def wait_for_job_run(emr, application_id, job_run_id):
         if state in JOB_RUN_TERMINAL_STATES:
             break
         if time.monotonic() >= deadline:
-            # Deliberately not cancelling the job run -- it may well still
-            # succeed, and a half-cancelled Spark write is worse than one
-            # this Flight simply stopped watching.
+            # Left running on purpose: a half-cancelled Spark write is
+            # worse than one this Flight merely stopped watching.
             raise TimeoutError(
                 f"Job run {job_run_id} still {state} after {timeout}s; it is "
                 "still running in EMR Serverless. Check it with `aws "
@@ -200,8 +148,7 @@ def run_spark_job():
         access_key_id = os.environ["aws_emr_AWS_ACCESS_KEY_ID"]
         secret_access_key = os.environ["aws_emr_AWS_SECRET_ACCESS_KEY"]
     except KeyError as missing:
-        # A bare KeyError here reads like a bug rather than what it is:
-        # the Flight is missing its secret reference entirely.
+        # A bare KeyError reads like a bug, not a missing secret reference.
         raise RuntimeError(
             f"{missing.args[0]} is not in the environment. This Flight needs "
             "the `aws_emr` secret (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) "
@@ -216,9 +163,7 @@ def run_spark_job():
 
     role_arn = config("EMR_EXECUTION_ROLE_ARN")
     if not role_arn:
-        # setup.sh always names the role this, and it lives in whichever
-        # account these credentials belong to -- so ask STS rather than
-        # making the operator copy an account id into config.
+        # Ask STS rather than making the operator copy an account id in.
         account_id = session.client("sts").get_caller_identity()["Account"]
         role_arn = f"arn:aws:iam::{account_id}:role/f1-radio-topics-emrs-role"
 
@@ -231,7 +176,7 @@ def run_spark_job():
 
 
 def fetch_dbt_project():
-    """Copy of f1-transform-dbt's fetch: build whatever is on GitHub."""
+    """Same fetch as f1-transform-dbt: build whatever is on GitHub."""
     ref = config("GITHUB_REF", "main")
     url = f"https://codeload.github.com/{GITHUB_REPO}/tar.gz/{ref}"
     with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT_SEC) as resp:
@@ -241,8 +186,7 @@ def fetch_dbt_project():
         for member in tar.getmembers():
             if not member.isfile():
                 continue
-            # Strip the leading "<repo>-<ref>/" component GitHub adds, then
-            # the "dbt/" prefix -- we only want that subdirectory.
+            # Strip GitHub's "<repo>-<ref>/" prefix, then "dbt/".
             parts = pathlib.PurePosixPath(member.name).parts[1:]
             if len(parts) < 2 or parts[0] != "dbt":
                 continue
@@ -275,21 +219,12 @@ def run_dbt():
 
 
 def report_dive_data():
-    """Confirm the marts dives/radio_topics_dive.tsx reads actually moved.
-
-    There's no external refresh for a Dive -- it queries live data on every
-    render, so the moment dbt commits, the Dive is current. What's worth
-    doing instead is proving the run produced something the Dive can show,
-    so a green Flight run means "new radio is on the dashboard" rather than
-    just "no step raised".
-    """
+    """Log what the Dive can now show, and fail if it would show nothing."""
     log("[3/3] Verifying the Dive's marts")
     con = duckdb.connect("md:")
-    # The Flight container has no local timezone, so DuckDB's TimeZone
-    # setting resolves to 'Etc/Unknown' and handing a TIMESTAMPTZ back to
-    # Python dies in pytz. Pin the session to UTC -- and render session_date
-    # as text below -- so a step that only ever prints these values can't
-    # fail on converting one.
+    # No local timezone in the container, so DuckDB reports 'Etc/Unknown'
+    # and pytz dies converting a TIMESTAMPTZ. Pin UTC, and format
+    # session_date in SQL below, since this step only prints these values.
     con.execute("SET TimeZone = 'UTC'")
     total_sessions, total_messages = con.execute(
         f"SELECT count(DISTINCT session_key), sum(message_count) FROM {DIVE_MART}"
