@@ -4,10 +4,10 @@
 import { useMemo } from "react";
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
 import {
-  Bar,
-  BarChart,
   CartesianGrid,
-  Legend,
+  Line,
+  LineChart,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -210,6 +210,7 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
     `
       select
         session_key,
+        year,
         circuit_short_name,
         session_name,
         session_date,
@@ -222,7 +223,7 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
           ? ""
           : `${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'`,
       )}
-      group by 1, 2, 3, 4, 5
+      group by 1, 2, 3, 4, 5, 6
       order by session_date
     `,
     { enabled: season != null && (groupBy === "all" || effectiveEntity != null) },
@@ -286,31 +287,7 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
           No radio messages found{groupBy === "all" ? "" : ` for ${effectiveEntity}`}.
         </p>
       ) : (
-        <ResponsiveContainer width="100%" height={340}>
-          <BarChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-            <XAxis
-              dataKey="race"
-              fontSize={11}
-              interval={0}
-              angle={-30}
-              textAnchor="end"
-              height={80}
-              tickMargin={12}
-            />
-            <YAxis fontSize={11} label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }} />
-            <Tooltip />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            {topics.map((t, i) => (
-              <Bar
-                key={t}
-                dataKey={t}
-                stackId="topics"
-                fill={t === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length]}
-              />
-            ))}
-          </BarChart>
-        </ResponsiveContainer>
+        <SeasonSeriesChart season={season} chartData={chartData} series={topics} />
       )}
     </div>
   );
@@ -342,7 +319,7 @@ function buildStackedSeries(
   for (const r of rows) {
     const sessionKey = N(r.session_key);
     if (!byRace.has(sessionKey)) {
-      byRace.set(sessionKey, { session_key: sessionKey, race: chartRaceLabel(r) });
+      byRace.set(sessionKey, { session_key: sessionKey, year: N(r.year), race: chartRaceLabel(r) });
     }
     const row = byRace.get(sessionKey)!;
     const key = seriesKey(r);
@@ -353,6 +330,129 @@ function buildStackedSeries(
   const chartData = [...byRace.values()].sort((a, b) => N(a.session_key) - N(b.session_key));
   const series = hasOther ? [...topSeries, "Other"] : topSeries;
   return { chartData, series };
+}
+
+/** Splits sorted chartData into one array per season (by the `year` every
+ * row carries), oldest season first — used to render one mini chart per
+ * season instead of a single chart with every season's races crammed onto
+ * one x-axis. */
+function groupBySeasonYear(
+  chartData: Record<string, unknown>[],
+): { year: number; data: Record<string, unknown>[] }[] {
+  const byYear = new Map<number, Record<string, unknown>[]>();
+  for (const row of chartData) {
+    const year = N(row.year);
+    if (!byYear.has(year)) byYear.set(year, []);
+    byYear.get(year)!.push(row);
+  }
+  return [...byYear.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([year, data]) => ({ year, data }));
+}
+
+/** Color-keyed legend shared across a season's stack of mini charts (or a
+ * single chart), rendered once above the chart(s) rather than per-chart so
+ * it doesn't repeat once "All" seasons splits into several charts. */
+function SeriesLegend({ series }: { series: string[] }) {
+  if (series.length <= 1) return null;
+  return (
+    <div className="flex flex-wrap gap-3 mb-3">
+      {series.map((s, i) => (
+        <div key={s} className="flex items-center gap-1 text-xs" style={{ color: "#6a6a6a" }}>
+          <span
+            style={{
+              display: "inline-block",
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              background: s === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length],
+            }}
+          />
+          {s}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TopicLineChart({
+  chartData,
+  series,
+  height = 340,
+}: {
+  chartData: Record<string, unknown>[];
+  series: string[];
+  height?: number;
+}) {
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <LineChart data={chartData}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+        <XAxis
+          dataKey="race"
+          fontSize={11}
+          interval={0}
+          angle={-30}
+          textAnchor="end"
+          height={80}
+          tickMargin={12}
+        />
+        <YAxis fontSize={11} label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }} />
+        <Tooltip />
+        {series.map((s, i) => (
+          <Line
+            key={s}
+            type="monotone"
+            dataKey={s}
+            stroke={s === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length]}
+            strokeWidth={2}
+            dot={{ r: 2 }}
+            activeDot={{ r: 4 }}
+          />
+        ))}
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+/** Shared season-aware chart: a single line chart for one season, or — when
+ * "All" seasons is selected — one smaller line chart per season stacked
+ * vertically, so the x-axis never has to fit every race from every season
+ * at once. */
+function SeasonSeriesChart({
+  season,
+  chartData,
+  series,
+}: {
+  season: Season;
+  chartData: Record<string, unknown>[];
+  series: string[];
+}) {
+  if (season !== "all") {
+    return (
+      <>
+        <SeriesLegend series={series} />
+        <TopicLineChart chartData={chartData} series={series} />
+      </>
+    );
+  }
+
+  const bySeason = groupBySeasonYear(chartData);
+  return (
+    <>
+      <SeriesLegend series={series} />
+      <div className="space-y-6">
+        {bySeason.map(({ year, data }) => (
+          <div key={year}>
+            <h3 className="text-xs font-semibold mb-1" style={{ color: "#231f20" }}>
+              {year}
+            </h3>
+            <TopicLineChart chartData={data} series={series} height={220} />
+          </div>
+        ))}
+      </div>
+    </>
+  );
 }
 
 function TopicOverSeason({ season }: { season: Season }) {
@@ -389,6 +489,7 @@ function TopicOverSeason({ season }: { season: Season }) {
     `
       select
         session_key,
+        year,
         circuit_short_name,
         session_name,
         session_date,
@@ -396,7 +497,7 @@ function TopicOverSeason({ season }: { season: Season }) {
         sum(message_count) as message_count
       from ${FCT_DRIVER_TOPIC_RACE}
       ${whereClause(seasonFilter(season), `topic_label = '${effectiveTopic}'`)}
-      group by 1, 2, 3, 4, 5
+      group by 1, 2, 3, 4, 5, 6
       order by session_date
     `,
     { enabled: season != null && effectiveTopic != null },
@@ -467,32 +568,142 @@ function TopicOverSeason({ season }: { season: Season }) {
           <p className="text-sm mb-2" style={{ color: "#6a6a6a" }}>
             {totalMessages} messages across {raceCount} races
           </p>
-          <ResponsiveContainer width="100%" height={340}>
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-              <XAxis
-                dataKey="race"
-                fontSize={11}
-                interval={0}
-                angle={-30}
-                textAnchor="end"
-                height={80}
-                tickMargin={12}
-              />
-              <YAxis fontSize={11} label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }} />
-              <Tooltip />
-              {breakdown !== "total" && <Legend wrapperStyle={{ fontSize: 11 }} />}
-              {series.map((s, i) => (
-                <Bar
-                  key={s}
-                  dataKey={s}
-                  stackId="entities"
-                  fill={s === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length]}
-                />
-              ))}
-            </BarChart>
-          </ResponsiveContainer>
+          <SeasonSeriesChart season={season} chartData={chartData} series={series} />
         </>
+      )}
+    </div>
+  );
+}
+
+// Sessions run in this order across a weekend when more than one is present
+// (a normal weekend has just Qualifying + Race; a sprint weekend inserts
+// Sprint between them). Anything else (e.g. practice sessions, if ever
+// included) falls back to sorting by its own earliest message.
+const SESSION_ORDER = ["Qualifying", "Sprint", "Race"];
+const TIMELINE_BUCKETS_PER_SESSION = 20;
+
+/** Buckets a weekend's raw (session_name, message_date) rows into fixed-size
+ * time buckets per session, then concatenates the sessions in running order
+ * so the whole weekend reads as one continuous timeline — each session
+ * rescaled to the same bucket count regardless of its real duration, so a
+ * short Sprint isn't squeezed into a sliver next to a long Race. */
+function buildWeekendTimeline(rows: Record<string, unknown>[]) {
+  const bySession = new Map<string, number[]>();
+  for (const r of rows) {
+    const name = String(r.session_name);
+    const t = new Date(String(r.message_date)).getTime();
+    if (Number.isNaN(t)) continue;
+    if (!bySession.has(name)) bySession.set(name, []);
+    bySession.get(name)!.push(t);
+  }
+
+  const sessionNames = [...bySession.keys()].sort((a, b) => {
+    const ai = SESSION_ORDER.indexOf(a);
+    const bi = SESSION_ORDER.indexOf(b);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return Math.min(...bySession.get(a)!) - Math.min(...bySession.get(b)!);
+  });
+
+  const points: { index: number; count: number; session_name: string }[] = [];
+  const segments: { session_name: string; start: number; end: number }[] = [];
+  let cursor = 0;
+  for (const name of sessionNames) {
+    const times = bySession.get(name)!.sort((a, b) => a - b);
+    const min = times[0];
+    const span = Math.max(times[times.length - 1] - min, 1);
+    const counts = new Array(TIMELINE_BUCKETS_PER_SESSION).fill(0);
+    for (const t of times) {
+      const bucket = Math.min(
+        TIMELINE_BUCKETS_PER_SESSION - 1,
+        Math.floor(((t - min) / span) * TIMELINE_BUCKETS_PER_SESSION),
+      );
+      counts[bucket]++;
+    }
+    const start = cursor;
+    for (const count of counts) {
+      points.push({ index: cursor, count, session_name: name });
+      cursor++;
+    }
+    segments.push({ session_name: name, start, end: cursor - 1 });
+  }
+  return { points, segments };
+}
+
+function WeekendTimelineTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: { payload: { session_name: string; count: number } }[];
+}) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload;
+  return (
+    <div
+      style={{
+        background: "#fff",
+        border: "1px solid #ddd",
+        borderRadius: 4,
+        padding: "4px 8px",
+        fontSize: 11,
+      }}
+    >
+      <div style={{ fontWeight: 600, color: "#231f20" }}>{p.session_name}</div>
+      <div style={{ color: "#6a6a6a" }}>{p.count} messages</div>
+    </div>
+  );
+}
+
+/** Message-volume evolution across an entire race weekend (Qualifying,
+ * Sprint if present, and Race back to back), so bursts of radio chatter —
+ * race starts, safety cars, pit windows — are visible against which session
+ * they happened in, rather than only within one session at a time. */
+function WeekendRadioTimeline({ circuit, year }: { circuit: string; year: number }) {
+  const rowsQ = useSQLQuery(`
+    select session_name, message_date
+    from ${FCT_RADIO_MESSAGES}
+    where circuit_short_name = '${circuit}' and year = ${year}
+    order by message_date
+  `);
+  const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
+  const { points, segments } = useMemo(() => buildWeekendTimeline(rows), [rows]);
+
+  return (
+    <div className="mb-6">
+      <h2 className="text-sm font-semibold mb-2" style={{ color: "#231f20" }}>
+        Radio traffic over the weekend
+      </h2>
+      {rowsQ.isLoading ? (
+        <div className="flex items-center gap-2" style={{ color: "#6a6a6a", height: 160 }}>
+          <Loader2 className="animate-spin" size={16} /> Loading weekend timeline…
+        </div>
+      ) : rowsQ.isError ? (
+        <p style={{ color: "#bc1200" }}>Failed to load: {rowsQ.error?.message}</p>
+      ) : points.length === 0 ? (
+        <p style={{ color: "#6a6a6a" }}>No radio messages found for this weekend.</p>
+      ) : (
+        <ResponsiveContainer width="100%" height={180}>
+          <LineChart data={points}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+            <XAxis dataKey="index" tick={false} axisLine={false} tickLine={false} />
+            <YAxis fontSize={11} width={30} allowDecimals={false} />
+            <Tooltip content={<WeekendTimelineTooltip />} />
+            {segments.map((seg, i) => (
+              <ReferenceArea
+                key={seg.session_name}
+                x1={seg.start}
+                x2={seg.end}
+                strokeOpacity={0}
+                fill={i % 2 === 0 ? "#0777b3" : "#bd4e35"}
+                fillOpacity={0.06}
+                label={{ value: seg.session_name, position: "insideTop", fontSize: 11, fill: "#6a6a6a" }}
+              />
+            ))}
+            <Line type="monotone" dataKey="count" stroke="#0777b3" strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
       )}
     </div>
   );
@@ -501,7 +712,7 @@ function TopicOverSeason({ season }: { season: Season }) {
 function RaceTopicsDetail({ season }: { season: Season }) {
   const sessionsQ = useSQLQuery(
     `
-      select distinct session_key, circuit_short_name, session_name, session_date
+      select distinct session_key, year, circuit_short_name, session_name, session_date
       from ${FCT_DRIVER_TOPIC_RACE}
       ${whereClause(seasonFilter(season))}
       order by session_date
@@ -521,6 +732,7 @@ function RaceTopicsDetail({ season }: { season: Season }) {
       : sessions.length
         ? N(sessions[sessions.length - 1].session_key)
         : null;
+  const effectiveSession = sessions.find((s) => N(s.session_key) === effectiveSessionKey);
 
   const messagesQ = useSQLQuery(
     `
@@ -569,6 +781,13 @@ function RaceTopicsDetail({ season }: { season: Season }) {
           </select>
         )}
       </div>
+
+      {effectiveSession != null && (
+        <WeekendRadioTimeline
+          circuit={String(effectiveSession.circuit_short_name)}
+          year={N(effectiveSession.year)}
+        />
+      )}
 
       <h2 className="text-sm font-semibold mb-2" style={{ color: "#231f20" }}>
         Topic breakdown
