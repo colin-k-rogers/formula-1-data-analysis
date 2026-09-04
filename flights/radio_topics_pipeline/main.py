@@ -196,9 +196,21 @@ def run_spark_job():
             "state.sh."
         )
     region = config("AWS_REGION", "us-east-1")
+    try:
+        access_key_id = os.environ["aws_emr_AWS_ACCESS_KEY_ID"]
+        secret_access_key = os.environ["aws_emr_AWS_SECRET_ACCESS_KEY"]
+    except KeyError as missing:
+        # A bare KeyError here reads like a bug rather than what it is:
+        # the Flight is missing its secret reference entirely.
+        raise RuntimeError(
+            f"{missing.args[0]} is not in the environment. This Flight needs "
+            "the `aws_emr` secret (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) "
+            "listed in its secret references -- see "
+            "warehouse/setup_flight_submitter_iam_user.sh."
+        ) from None
     session = boto3.session.Session(
-        aws_access_key_id=os.environ["aws_emr_AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["aws_emr_AWS_SECRET_ACCESS_KEY"],
+        aws_access_key_id=access_key_id,
+        aws_secret_access_key=secret_access_key,
         region_name=region,
     )
 
