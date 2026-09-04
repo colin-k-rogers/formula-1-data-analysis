@@ -1,53 +1,144 @@
-// Kept byte-for-byte identical to dives/season_pace_dive.tsx (the deployed
-// dive source) — mirror any change there too.
-import { useEffect, useRef, useState } from "react";
+// Kept byte-for-byte identical to .dive-preview/src/dive.tsx whenever this is
+// the dive you're actively previewing — mirror any change there too. (Only
+// one dive can be live in the preview app at a time; see README.md.)
+import { useMemo } from "react";
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
 import {
-  LineChart,
-  Line,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
 } from "recharts";
 import { Loader2 } from "lucide-react";
 
+export const REQUIRED_DATABASES = [
+  {
+    type: "database",
+    path: "md:f1",
+    alias: "f1",
+  },
+];
+
 const N = (v: unknown): number => (v != null ? Number(v) : 0);
 
-function formatLapTime(seconds: number): string {
-  const mins = Math.floor(seconds / 60);
-  const secs = (seconds - mins * 60).toFixed(3);
-  return `${mins}:${secs.padStart(6, "0")}`;
+const FCT_DRIVER_TOPIC_RACE = '"f1"."marts"."fct_driver_topic_race"';
+const FCT_RADIO_MESSAGES = '"f1"."marts"."fct_radio_messages"';
+
+const PALETTE = ["#0777b3", "#bd4e35", "#2d7a00", "#e18727", "#638CAD", "#8e44ad"];
+const OTHER_COLOR = "#adadad";
+const TOP_N_SERIES = 6;
+
+function raceLabel(row: Record<string, unknown>): string {
+  return `${String(row.circuit_short_name)} — ${String(row.session_date).slice(0, 10)}`;
 }
 
-const FCT_LAP_PACE = '"f1"."marts"."fct_lap_pace"';
+// Circuit name only, no date — used for the chart's x-axis, where
+// raceLabel's full "circuit — date" text was long enough (especially
+// rotated) to run over into the plotted bars. The session dropdown still
+// uses raceLabel: there's no rotation/overflow issue there, and the date
+// helps distinguish same-circuit races across seasons when "All" is picked.
+function chartRaceLabel(row: Record<string, unknown>): string {
+  return String(row.circuit_short_name);
+}
 
-const PALETTE = ["#0777b3", "#bd4e35", "#2d7a00", "#e18727", "#638CAD", "#adadad"];
+// A specific year, the "all" sentinel (no year filter), or null while the
+// season list is still loading.
+type Season = number | "all" | null;
 
-export default function SeasonPaceDive() {
-  const [view, setView] = useDiveState<"season" | "race">("view", "season");
+/** SQL fragment restricting to a single season, or "" for "all"/null (no
+ * filter — every query here already validated `season` against the known
+ * season list or the "all" sentinel before it reaches SQL). */
+function seasonFilter(season: Season): string {
+  return season != null && season !== "all" ? `year = ${season}` : "";
+}
+
+/** Joins non-empty SQL conditions with `and`, prefixed with `where` — so
+ * callers can freely mix an optional season filter with other conditions
+ * without juggling `where`/`and` placement themselves. */
+function whereClause(...conditions: string[]): string {
+  const parts = conditions.filter(Boolean);
+  return parts.length ? `where ${parts.join(" and ")}` : "";
+}
+
+export default function RadioTopicsDive() {
+  const [view, setView] = useDiveState<"season" | "topic" | "race">("view", "season");
+
+  const seasonsQ = useSQLQuery(`
+    select distinct year from ${FCT_DRIVER_TOPIC_RACE} order by year desc
+  `);
+  const seasons = (Array.isArray(seasonsQ.data) ? seasonsQ.data : []).map((r) => N(r.year));
+
+  // Same URL-state-can't-be-trusted-verbatim rule as `entity`/`session`
+  // below: only accept a season that's actually one of this query's results
+  // (or the "all" sentinel, which is always valid).
+  const [season, setSeason] = useDiveState<Season>("season_year", null);
+  const effectiveSeason: Season =
+    season === "all" || (season != null && seasons.includes(season))
+      ? season
+      : (seasons[0] ?? null);
 
   return (
-    <div className="p-6" style={{ background: "#f8f8f8", maxWidth: 900, margin: "0 auto" }}>
+    <div className="p-6" style={{ background: "#f8f8f8", maxWidth: 960, margin: "0 auto" }}>
       <h1 className="text-2xl font-semibold" style={{ color: "#231f20" }}>
-        Relative Lap Pace
+        Team Radio Topics
       </h1>
       <p className="text-sm mb-6" style={{ color: "#6a6a6a" }}>
-        Each driver's lap time compared with the fastest lap turned by the field on that
-        same lap, across all ingested Race sessions.
+        What drivers and teams talk about on team radio, transcribed with Whisper and
+        topic-modeled with BERTopic, tracked across the season.
       </p>
+
+      <div className="flex gap-2 mb-4">
+        <button
+          onClick={() => setSeason("all")}
+          className="text-sm px-3 py-1 rounded"
+          style={{
+            background: effectiveSeason === "all" ? "#231f20" : "transparent",
+            color: effectiveSeason === "all" ? "#fff" : "#6a6a6a",
+            border: `1px solid ${effectiveSeason === "all" ? "#231f20" : "#ddd"}`,
+          }}
+        >
+          All
+        </button>
+        {seasons.map((y) => (
+          <button
+            key={y}
+            onClick={() => setSeason(y)}
+            className="text-sm px-3 py-1 rounded"
+            style={{
+              background: y === effectiveSeason ? "#231f20" : "transparent",
+              color: y === effectiveSeason ? "#fff" : "#6a6a6a",
+              border: `1px solid ${y === effectiveSeason ? "#231f20" : "#ddd"}`,
+            }}
+          >
+            {y}
+          </button>
+        ))}
+      </div>
 
       <div className="flex gap-2 mb-6">
         <button
           onClick={() => setView("season")}
           className="text-sm px-3 py-1 rounded"
           style={{
-            background: view !== "race" ? "#0777b3" : "transparent",
-            color: view !== "race" ? "#fff" : "#6a6a6a",
+            background: view === "season" ? "#0777b3" : "transparent",
+            color: view === "season" ? "#fff" : "#6a6a6a",
           }}
         >
-          Season overview
+          Season evolution
+        </button>
+        <button
+          onClick={() => setView("topic")}
+          className="text-sm px-3 py-1 rounded"
+          style={{
+            background: view === "topic" ? "#0777b3" : "transparent",
+            color: view === "topic" ? "#fff" : "#6a6a6a",
+          }}
+        >
+          Topic over season
         </button>
         <button
           onClick={() => setView("race")}
@@ -61,172 +152,387 @@ export default function SeasonPaceDive() {
         </button>
       </div>
 
-      {view === "race" ? <RaceDetail /> : <SeasonOverview />}
-    </div>
-  );
-}
-
-function SeasonOverview() {
-  const q = useSQLQuery(`
-    select
-      driver_acronym,
-      team_name,
-      avg(delta_to_fastest) as avg_delta,
-      count(distinct session_key) as races
-    from ${FCT_LAP_PACE}
-    group by 1, 2
-    order by avg_delta asc
-  `);
-
-  const rows = Array.isArray(q.data) ? q.data : [];
-
-  return (
-    <div>
-      {q.isLoading ? (
-        <div className="animate-pulse space-y-2">
-          <div className="h-4 bg-gray-200 rounded w-3/4" />
-          <div className="h-4 bg-gray-200 rounded w-1/2" />
-          <div className="h-4 bg-gray-200 rounded w-2/3" />
-        </div>
-      ) : q.isError ? (
-        <p style={{ color: "#bc1200" }}>Failed to load: {q.error?.message}</p>
+      {view === "race" ? (
+        <RaceTopicsDetail season={effectiveSeason} />
+      ) : view === "topic" ? (
+        <TopicOverSeason season={effectiveSeason} />
       ) : (
-        <table className="w-full text-sm" style={{ borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ borderBottom: "1px solid #ddd", color: "#6a6a6a", textAlign: "left" }}>
-              <th className="py-2">#</th>
-              <th className="py-2">Driver</th>
-              <th className="py-2">Team</th>
-              <th className="py-2 text-right">Avg gap to fastest lap</th>
-              <th className="py-2 text-right">Races</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={String(r.driver_acronym)} style={{ borderBottom: "1px solid #eee" }}>
-                <td className="py-1" style={{ color: "#6a6a6a" }}>{i + 1}</td>
-                <td className="py-1" style={{ color: "#231f20", fontWeight: 600 }}>
-                  {String(r.driver_acronym)}
-                </td>
-                <td className="py-1" style={{ color: "#6a6a6a" }}>{String(r.team_name)}</td>
-                <td className="py-1 text-right" style={{ color: "#231f20" }}>
-                  +{N(r.avg_delta).toFixed(3)}s
-                </td>
-                <td className="py-1 text-right" style={{ color: "#6a6a6a" }}>{N(r.races)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <SeasonTopicsEvolution season={effectiveSeason} />
       )}
     </div>
   );
 }
 
-function RaceDetail() {
-  const sessionsQ = useSQLQuery(`
-    select distinct
-      session_key,
-      meeting_official_name,
-      circuit_short_name,
-      strftime(session_date AT TIME ZONE 'UTC', '%Y-%m-%d') as session_date
-    from ${FCT_LAP_PACE}
-    order by session_date
-  `);
+function SeasonTopicsEvolution({ season }: { season: Season }) {
+  const [groupBy, setGroupBy] = useDiveState<"driver" | "team" | "all">("groupBy", "driver");
+
+  const entitiesQ = useSQLQuery(
+    `
+      select distinct
+        ${groupBy === "driver" ? "driver_acronym as entity" : "team_name as entity"}
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season))}
+      order by entity
+    `,
+    // "all" has no single entity to pick, so there's nothing for this query
+    // to feed — skip it rather than fetch a dropdown that won't be shown.
+    { enabled: season != null && groupBy !== "all" },
+  );
+  const entities = Array.isArray(entitiesQ.data) ? entitiesQ.data : [];
+
+  // useDiveState persists to a URL fragment, so `entity` can come from a
+  // shared/crafted link rather than the <select> below — only ever trust a
+  // value that's actually one of this query's own results before it goes
+  // into SQL, instead of interpolating whatever the URL says verbatim.
+  const [entity, setEntity] = useDiveState<string | null>("entity", null);
+  const knownEntities = new Set(entities.map((row) => String(row.entity)));
+  const effectiveEntity =
+    entity != null && knownEntities.has(entity)
+      ? entity
+      : entities.length
+        ? String(entities[0].entity)
+        : null;
+
+  const rowsQ = useSQLQuery(
+    `
+      select
+        session_key,
+        circuit_short_name,
+        session_date,
+        topic_label,
+        sum(message_count) as message_count
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(
+        seasonFilter(season),
+        groupBy === "all"
+          ? ""
+          : `${groupBy === "driver" ? "driver_acronym" : "team_name"} = '${effectiveEntity}'`,
+      )}
+      group by 1, 2, 3, 4
+      order by session_date
+    `,
+    { enabled: season != null && (groupBy === "all" || effectiveEntity != null) },
+  );
+  const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
+
+  const { chartData, series: topics } = useMemo(
+    () => buildStackedSeries(rows, (r) => String(r.topic_label)),
+    [rows],
+  );
+
+  return (
+    <div>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="flex gap-2">
+          {(["driver", "team", "all"] as const).map((g) => (
+            <button
+              key={g}
+              onClick={() => {
+                setGroupBy(g);
+                setEntity(null);
+              }}
+              className="text-xs px-2 py-1 rounded"
+              style={{
+                background: groupBy === g ? "#231f20" : "transparent",
+                color: groupBy === g ? "#fff" : "#6a6a6a",
+                border: `1px solid ${groupBy === g ? "#231f20" : "#ddd"}`,
+              }}
+            >
+              {g === "all" ? "All" : `By ${g}`}
+            </button>
+          ))}
+        </div>
+
+        {groupBy === "all" ? null : entitiesQ.isLoading ? (
+          <div className="h-8 w-40 bg-gray-200 animate-pulse rounded" />
+        ) : (
+          <select
+            className="text-sm border rounded px-2 py-1"
+            style={{ color: "#231f20", borderColor: "#ddd" }}
+            value={effectiveEntity ?? ""}
+            onChange={(e) => setEntity(e.target.value)}
+          >
+            {entities.map((row) => (
+              <option key={String(row.entity)} value={String(row.entity)}>
+                {String(row.entity)}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {rowsQ.isLoading ? (
+        <div className="flex items-center gap-2" style={{ color: "#6a6a6a", height: 320 }}>
+          <Loader2 className="animate-spin" size={16} /> Loading radio topics…
+        </div>
+      ) : rowsQ.isError ? (
+        <p style={{ color: "#bc1200" }}>Failed to load: {rowsQ.error?.message}</p>
+      ) : chartData.length === 0 ? (
+        <p style={{ color: "#6a6a6a" }}>
+          No radio messages found{groupBy === "all" ? "" : ` for ${effectiveEntity}`}.
+        </p>
+      ) : (
+        <ResponsiveContainer width="100%" height={340}>
+          <BarChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+            <XAxis
+              dataKey="race"
+              fontSize={11}
+              interval={0}
+              angle={-30}
+              textAnchor="end"
+              height={80}
+              tickMargin={12}
+            />
+            <YAxis fontSize={11} label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }} />
+            <Tooltip />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            {topics.map((t, i) => (
+              <Bar
+                key={t}
+                dataKey={t}
+                stackId="topics"
+                fill={t === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length]}
+              />
+            ))}
+          </BarChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
+/** Pivots long rows (one per race x series) into one row per race with a
+ * column per series, keeping only the top N series by total volume across
+ * the season and folding the rest into "Other" so the chart stays readable.
+ * `seriesKey` picks the pivot dimension out of each row — a topic label when
+ * charting one entity's topic mix, or a team/driver name when charting one
+ * topic's spread across the field. */
+function buildStackedSeries(
+  rows: Record<string, unknown>[],
+  seriesKey: (row: Record<string, unknown>) => string,
+) {
+  const totalsBySeries = new Map<string, number>();
+  for (const r of rows) {
+    const key = seriesKey(r);
+    totalsBySeries.set(key, (totalsBySeries.get(key) ?? 0) + N(r.message_count));
+  }
+  const topSeries = [...totalsBySeries.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, TOP_N_SERIES)
+    .map(([key]) => key);
+  const topSeriesSet = new Set(topSeries);
+  const hasOther = totalsBySeries.size > topSeries.length;
+
+  const byRace = new Map<number, Record<string, unknown>>();
+  for (const r of rows) {
+    const sessionKey = N(r.session_key);
+    if (!byRace.has(sessionKey)) {
+      byRace.set(sessionKey, { session_key: sessionKey, race: chartRaceLabel(r) });
+    }
+    const row = byRace.get(sessionKey)!;
+    const key = seriesKey(r);
+    const bucket = topSeriesSet.has(key) ? key : "Other";
+    row[bucket] = N(row[bucket]) + N(r.message_count);
+  }
+
+  const chartData = [...byRace.values()].sort((a, b) => N(a.session_key) - N(b.session_key));
+  const series = hasOther ? [...topSeries, "Other"] : topSeries;
+  return { chartData, series };
+}
+
+function TopicOverSeason({ season }: { season: Season }) {
+  const topicsQ = useSQLQuery(
+    `
+      select topic_label, sum(message_count) as total_messages
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season))}
+      group by 1
+      order by total_messages desc
+    `,
+    { enabled: season != null },
+  );
+  const topicOptions = Array.isArray(topicsQ.data) ? topicsQ.data : [];
+
+  // Same known-values guard as `entity`/`session` elsewhere in this dive — a
+  // `topic` left over from a previously-selected season (or a crafted link)
+  // shouldn't be trusted just because it's non-null.
+  const [topic, setTopic] = useDiveState<string | null>("topic", null);
+  const knownTopics = new Set(topicOptions.map((row) => String(row.topic_label)));
+  const effectiveTopic =
+    topic != null && knownTopics.has(topic)
+      ? topic
+      : topicOptions.length
+        ? String(topicOptions[0].topic_label)
+        : null;
+
+  const [breakdown, setBreakdown] = useDiveState<"team" | "driver" | "total">(
+    "topicBreakdown",
+    "team",
+  );
+
+  const rowsQ = useSQLQuery(
+    `
+      select
+        session_key,
+        circuit_short_name,
+        session_date,
+        ${breakdown === "total" ? "'Messages'" : breakdown === "team" ? "team_name" : "driver_acronym"} as entity,
+        sum(message_count) as message_count
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season), `topic_label = '${effectiveTopic}'`)}
+      group by 1, 2, 3, 4
+      order by session_date
+    `,
+    { enabled: season != null && effectiveTopic != null },
+  );
+  const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
+
+  const { chartData, series } = useMemo(
+    () => buildStackedSeries(rows, (r) => String(r.entity)),
+    [rows],
+  );
+  const totalMessages = rows.reduce((sum, r) => sum + N(r.message_count), 0);
+  const raceCount = new Set(rows.map((r) => N(r.session_key))).size;
+
+  return (
+    <div>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        {topicsQ.isLoading ? (
+          <div className="h-8 w-64 bg-gray-200 animate-pulse rounded" />
+        ) : (
+          <select
+            className="text-sm border rounded px-2 py-1"
+            style={{ color: "#231f20", borderColor: "#ddd" }}
+            value={effectiveTopic ?? ""}
+            onChange={(e) => setTopic(e.target.value)}
+          >
+            {topicOptions.map((row) => (
+              <option key={String(row.topic_label)} value={String(row.topic_label)}>
+                {String(row.topic_label)}
+              </option>
+            ))}
+          </select>
+        )}
+
+        <div className="flex gap-2">
+          {(
+            [
+              ["team", "By team"],
+              ["driver", "By driver"],
+              ["total", "Total"],
+            ] as const
+          ).map(([b, label]) => (
+            <button
+              key={b}
+              onClick={() => setBreakdown(b)}
+              className="text-xs px-2 py-1 rounded"
+              style={{
+                background: breakdown === b ? "#231f20" : "transparent",
+                color: breakdown === b ? "#fff" : "#6a6a6a",
+                border: `1px solid ${breakdown === b ? "#231f20" : "#ddd"}`,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {rowsQ.isLoading ? (
+        <div className="flex items-center gap-2" style={{ color: "#6a6a6a", height: 320 }}>
+          <Loader2 className="animate-spin" size={16} /> Loading topic history…
+        </div>
+      ) : rowsQ.isError ? (
+        <p style={{ color: "#bc1200" }}>Failed to load: {rowsQ.error?.message}</p>
+      ) : chartData.length === 0 ? (
+        <p style={{ color: "#6a6a6a" }}>No radio messages found for this topic.</p>
+      ) : (
+        <>
+          <p className="text-sm mb-2" style={{ color: "#6a6a6a" }}>
+            {totalMessages} messages across {raceCount} races
+          </p>
+          <ResponsiveContainer width="100%" height={340}>
+            <BarChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+              <XAxis
+                dataKey="race"
+                fontSize={11}
+                interval={0}
+                angle={-30}
+                textAnchor="end"
+                height={80}
+                tickMargin={12}
+              />
+              <YAxis fontSize={11} label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }} />
+              <Tooltip />
+              {breakdown !== "total" && <Legend wrapperStyle={{ fontSize: 11 }} />}
+              {series.map((s, i) => (
+                <Bar
+                  key={s}
+                  dataKey={s}
+                  stackId="entities"
+                  fill={s === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length]}
+                />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RaceTopicsDetail({ season }: { season: Season }) {
+  const sessionsQ = useSQLQuery(
+    `
+      select distinct session_key, circuit_short_name, session_date
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season))}
+      order by session_date
+    `,
+    { enabled: season != null },
+  );
   const sessions = Array.isArray(sessionsQ.data) ? sessionsQ.data : [];
 
+  // Same known-values guard as `entity` above — a `session` left over from a
+  // previously-selected season (or a crafted link) shouldn't silently be
+  // trusted just because it's non-null.
   const [sessionKey, setSessionKey] = useDiveState<number | null>("session", null);
+  const knownSessionKeys = new Set(sessions.map((s) => N(s.session_key)));
   const effectiveSessionKey =
-    sessionKey ?? (sessions.length ? N(sessions[sessions.length - 1].session_key) : null);
+    sessionKey != null && knownSessionKeys.has(sessionKey)
+      ? sessionKey
+      : sessions.length
+        ? N(sessions[sessions.length - 1].session_key)
+        : null;
 
-  const driversQ = useSQLQuery(
+  const messagesQ = useSQLQuery(
     `
-      select
-        driver_acronym,
-        team_colour,
-        avg(delta_to_fastest) as avg_delta
-      from ${FCT_LAP_PACE}
+      select driver_acronym, team_colour, lap_number, message_date, topic_label, transcript_text
+      from ${FCT_RADIO_MESSAGES}
       where session_key = ${effectiveSessionKey}
-      group by 1, 2
-      order by avg_delta asc
+      order by message_date
     `,
     { enabled: effectiveSessionKey != null },
   );
-  const raceDrivers = Array.isArray(driversQ.data) ? driversQ.data : [];
+  const messageRows = Array.isArray(messagesQ.data) ? messagesQ.data : [];
 
-  const [selectedDrivers, setSelectedDrivers] = useDiveState<string[]>("drivers", []);
-
-  // driversQ.data keeps showing the *previous* session's rows for a render or
-  // two after effectiveSessionKey changes (the query hasn't re-fetched yet),
-  // so gate on the data array reference actually changing rather than on
-  // effectiveSessionKey/length alone — otherwise this reseeds from stale data
-  // and then never corrects itself once the real rows for the new session
-  // arrive with the same driver count.
-  const seededSessionKeyRef = useRef<number | null>(null);
-  const prevDriversDataRef = useRef(driversQ.data);
-  useEffect(() => {
-    const dataChanged = driversQ.data !== prevDriversDataRef.current;
-    prevDriversDataRef.current = driversQ.data;
-    if (
-      dataChanged &&
-      driversQ.isSuccess &&
-      raceDrivers.length > 0 &&
-      seededSessionKeyRef.current !== effectiveSessionKey
-    ) {
-      seededSessionKeyRef.current = effectiveSessionKey;
-      setSelectedDrivers(raceDrivers.slice(0, 5).map((d) => String(d.driver_acronym)));
+  // The topic breakdown is just a tally over messageRows — every message
+  // already carries its topic_label — so derive it client-side instead of
+  // firing a second query for the same session that duplicates work the
+  // browser can do for free from data it already fetched.
+  const breakdownRows = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of messageRows) {
+      const topic = String(r.topic_label);
+      counts.set(topic, (counts.get(topic) ?? 0) + 1);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [driversQ.data, driversQ.isSuccess, effectiveSessionKey]);
-
-  const lapsQ = useSQLQuery(
-    `
-      select lap_number, driver_acronym, delta_to_fastest
-      from ${FCT_LAP_PACE}
-      where session_key = ${effectiveSessionKey}
-      order by lap_number
-    `,
-    { enabled: effectiveSessionKey != null },
-  );
-  const lapRows = Array.isArray(lapsQ.data) ? lapsQ.data : [];
-
-  const summaryQ = useSQLQuery(
-    `
-      select
-        driver_acronym,
-        team_name,
-        avg(lap_duration) as avg_lap_time,
-        sum(delta_to_fastest) as cumulative_gap
-      from ${FCT_LAP_PACE}
-      where session_key = ${effectiveSessionKey}
-      group by 1, 2
-      order by cumulative_gap asc
-    `,
-    { enabled: effectiveSessionKey != null },
-  );
-  const summaryRows = Array.isArray(summaryQ.data) ? summaryQ.data : [];
-
-  const chartData: Record<string, number>[] = [];
-  const chartByLap = new Map<number, Record<string, number>>();
-  for (const r of lapRows) {
-    const acronym = String(r.driver_acronym);
-    if (!selectedDrivers.includes(acronym)) continue;
-    const lap = N(r.lap_number);
-    if (!chartByLap.has(lap)) {
-      const row = { lap_number: lap };
-      chartByLap.set(lap, row);
-      chartData.push(row);
-    }
-    chartByLap.get(lap)![acronym] = N(r.delta_to_fastest);
-  }
-  chartData.sort((a, b) => a.lap_number - b.lap_number);
-
-  function toggleDriver(acronym: string) {
-    setSelectedDrivers(
-      selectedDrivers.includes(acronym)
-        ? selectedDrivers.filter((d) => d !== acronym)
-        : [...selectedDrivers, acronym],
-    );
-  }
+    return [...counts.entries()]
+      .map(([topic_label, message_count]) => ({ topic_label, message_count }))
+      .sort((a, b) => b.message_count - a.message_count);
+  }, [messageRows]);
+  const totalMessages = breakdownRows.reduce((sum, r) => sum + r.message_count, 0);
 
   return (
     <div>
@@ -242,101 +548,76 @@ function RaceDetail() {
           >
             {sessions.map((s) => (
               <option key={String(s.session_key)} value={N(s.session_key)}>
-                {String(s.circuit_short_name)} — {String(s.session_date)}
+                {raceLabel(s)}
               </option>
             ))}
           </select>
         )}
       </div>
 
-      <div className="mb-4 flex flex-wrap gap-2">
-        {raceDrivers.map((d) => {
-          const acronym = String(d.driver_acronym);
-          const active = selectedDrivers.includes(acronym);
-          return (
-            <button
-              key={acronym}
-              onClick={() => toggleDriver(acronym)}
-              className="text-xs px-2 py-1 rounded"
-              style={{
-                background: active ? `#${String(d.team_colour)}` : "transparent",
-                color: active ? "#fff" : "#6a6a6a",
-                border: `1px solid ${active ? `#${String(d.team_colour)}` : "#ddd"}`,
-              }}
-            >
-              {acronym}
-            </button>
-          );
-        })}
-      </div>
-
-      {lapsQ.isLoading ? (
-        <div className="flex items-center gap-2" style={{ color: "#6a6a6a", height: 280 }}>
-          <Loader2 className="animate-spin" size={16} /> Loading laps…
-        </div>
-      ) : lapsQ.isError ? (
-        <p style={{ color: "#bc1200" }}>Failed to load: {lapsQ.error?.message}</p>
-      ) : (
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-            <XAxis dataKey="lap_number" fontSize={11} label={{ value: "Lap", position: "insideBottom", offset: -2, fontSize: 11 }} />
-            <YAxis
-              fontSize={11}
-              tickFormatter={(v) => `+${Number(v).toFixed(1)}s`}
-              label={{ value: "Gap to fastest lap", angle: -90, position: "insideLeft", fontSize: 11 }}
-            />
-            <Tooltip formatter={(v: number) => `+${Number(v).toFixed(3)}s`} />
-            {selectedDrivers.map((acronym, i) => (
-              <Line
-                key={acronym}
-                type="linear"
-                dataKey={acronym}
-                stroke={PALETTE[i % PALETTE.length]}
-                strokeWidth={2}
-                dot={false}
-                connectNulls
-              />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-      )}
-
-      <h2 className="text-sm font-semibold mt-6 mb-2" style={{ color: "#231f20" }}>
-        Race pace summary
+      <h2 className="text-sm font-semibold mb-2" style={{ color: "#231f20" }}>
+        Topic breakdown
       </h2>
-      {summaryQ.isLoading ? (
+      {messagesQ.isLoading ? (
         <div className="animate-pulse space-y-2">
           <div className="h-4 bg-gray-200 rounded w-3/4" />
           <div className="h-4 bg-gray-200 rounded w-1/2" />
         </div>
-      ) : summaryQ.isError ? (
-        <p style={{ color: "#bc1200" }}>Failed to load: {summaryQ.error?.message}</p>
+      ) : messagesQ.isError ? (
+        <p style={{ color: "#bc1200" }}>Failed to load: {messagesQ.error?.message}</p>
+      ) : (
+        <table className="w-full text-sm mb-6" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid #ddd", color: "#6a6a6a", textAlign: "left" }}>
+              <th className="py-2">Topic</th>
+              <th className="py-2 text-right">Messages</th>
+              <th className="py-2 text-right">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {breakdownRows.map((r) => (
+              <tr key={String(r.topic_label)} style={{ borderBottom: "1px solid #eee" }}>
+                <td className="py-1" style={{ color: "#231f20", fontWeight: 600 }}>
+                  {String(r.topic_label)}
+                </td>
+                <td className="py-1 text-right" style={{ color: "#231f20" }}>{N(r.message_count)}</td>
+                <td className="py-1 text-right" style={{ color: "#6a6a6a" }}>
+                  {totalMessages > 0 ? `${((N(r.message_count) / totalMessages) * 100).toFixed(0)}%` : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <h2 className="text-sm font-semibold mb-2" style={{ color: "#231f20" }}>
+        Radio messages
+      </h2>
+      {messagesQ.isLoading ? (
+        <div className="flex items-center gap-2" style={{ color: "#6a6a6a" }}>
+          <Loader2 className="animate-spin" size={16} /> Loading messages…
+        </div>
+      ) : messagesQ.isError ? (
+        <p style={{ color: "#bc1200" }}>Failed to load: {messagesQ.error?.message}</p>
       ) : (
         <table className="w-full text-sm" style={{ borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ borderBottom: "1px solid #ddd", color: "#6a6a6a", textAlign: "left" }}>
-              <th className="py-2">#</th>
               <th className="py-2">Driver</th>
-              <th className="py-2">Team</th>
-              <th className="py-2 text-right">Avg lap time</th>
-              <th className="py-2 text-right">Cumulative gap to fastest</th>
+              <th className="py-2">Lap</th>
+              <th className="py-2">Topic</th>
+              <th className="py-2">Transcript</th>
             </tr>
           </thead>
           <tbody>
-            {summaryRows.map((r, i) => (
-              <tr key={String(r.driver_acronym)} style={{ borderBottom: "1px solid #eee" }}>
-                <td className="py-1" style={{ color: "#6a6a6a" }}>{i + 1}</td>
-                <td className="py-1" style={{ color: "#231f20", fontWeight: 600 }}>
+            {messageRows.map((r, i) => (
+              <tr key={i} style={{ borderBottom: "1px solid #eee" }}>
+                <td className="py-1" style={{ color: `#${String(r.team_colour)}`, fontWeight: 600 }}>
                   {String(r.driver_acronym)}
                 </td>
-                <td className="py-1" style={{ color: "#6a6a6a" }}>{String(r.team_name)}</td>
-                <td className="py-1 text-right" style={{ color: "#231f20" }}>
-                  {formatLapTime(N(r.avg_lap_time))}
-                </td>
-                <td className="py-1 text-right" style={{ color: "#231f20" }}>
-                  +{N(r.cumulative_gap).toFixed(3)}s
-                </td>
+                <td className="py-1" style={{ color: "#6a6a6a" }}>{r.lap_number != null ? N(r.lap_number) : "—"}</td>
+                <td className="py-1" style={{ color: "#6a6a6a" }}>{String(r.topic_label)}</td>
+                <td className="py-1" style={{ color: "#231f20" }}>{String(r.transcript_text)}</td>
               </tr>
             ))}
           </tbody>

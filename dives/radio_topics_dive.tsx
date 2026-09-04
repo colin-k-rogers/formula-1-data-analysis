@@ -30,7 +30,7 @@ const FCT_RADIO_MESSAGES = '"f1"."marts"."fct_radio_messages"';
 
 const PALETTE = ["#0777b3", "#bd4e35", "#2d7a00", "#e18727", "#638CAD", "#8e44ad"];
 const OTHER_COLOR = "#adadad";
-const TOP_N_TOPICS = 6;
+const TOP_N_SERIES = 6;
 
 // Short suffix distinguishing same-weekend sessions (a circuit can now have
 // up to three: Qualifying, Sprint, and Race all show radio traffic). "Race"
@@ -78,7 +78,7 @@ function whereClause(...conditions: string[]): string {
 }
 
 export default function RadioTopicsDive() {
-  const [view, setView] = useDiveState<"season" | "race">("view", "season");
+  const [view, setView] = useDiveState<"season" | "topic" | "race">("view", "season");
 
   const seasonsQ = useSQLQuery(`
     select distinct year from ${FCT_DRIVER_TOPIC_RACE} order by year desc
@@ -137,11 +137,21 @@ export default function RadioTopicsDive() {
           onClick={() => setView("season")}
           className="text-sm px-3 py-1 rounded"
           style={{
-            background: view !== "race" ? "#0777b3" : "transparent",
-            color: view !== "race" ? "#fff" : "#6a6a6a",
+            background: view === "season" ? "#0777b3" : "transparent",
+            color: view === "season" ? "#fff" : "#6a6a6a",
           }}
         >
           Season evolution
+        </button>
+        <button
+          onClick={() => setView("topic")}
+          className="text-sm px-3 py-1 rounded"
+          style={{
+            background: view === "topic" ? "#0777b3" : "transparent",
+            color: view === "topic" ? "#fff" : "#6a6a6a",
+          }}
+        >
+          Topic over season
         </button>
         <button
           onClick={() => setView("race")}
@@ -157,6 +167,8 @@ export default function RadioTopicsDive() {
 
       {view === "race" ? (
         <RaceTopicsDetail season={effectiveSeason} />
+      ) : view === "topic" ? (
+        <TopicOverSeason season={effectiveSeason} />
       ) : (
         <SeasonTopicsEvolution season={effectiveSeason} />
       )}
@@ -217,7 +229,10 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
   );
   const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
 
-  const { chartData, topics } = useMemo(() => buildStackedSeries(rows), [rows]);
+  const { chartData, series: topics } = useMemo(
+    () => buildStackedSeries(rows, (r) => String(r.topic_label)),
+    [rows],
+  );
 
   return (
     <div>
@@ -301,22 +316,27 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
   );
 }
 
-/** Pivots long rows (one per race x topic) into one row per race with a
- * column per topic, keeping only the entity's top N topics by total volume
- * across the season and folding the rest into "Other" so the chart stays
- * readable even when BERTopic finds many small topics. */
-function buildStackedSeries(rows: Record<string, unknown>[]) {
-  const totalsByTopic = new Map<string, number>();
+/** Pivots long rows (one per race x series) into one row per race with a
+ * column per series, keeping only the top N series by total volume across
+ * the season and folding the rest into "Other" so the chart stays readable.
+ * `seriesKey` picks the pivot dimension out of each row — a topic label when
+ * charting one entity's topic mix, or a team/driver name when charting one
+ * topic's spread across the field. */
+function buildStackedSeries(
+  rows: Record<string, unknown>[],
+  seriesKey: (row: Record<string, unknown>) => string,
+) {
+  const totalsBySeries = new Map<string, number>();
   for (const r of rows) {
-    const topic = String(r.topic_label);
-    totalsByTopic.set(topic, (totalsByTopic.get(topic) ?? 0) + N(r.message_count));
+    const key = seriesKey(r);
+    totalsBySeries.set(key, (totalsBySeries.get(key) ?? 0) + N(r.message_count));
   }
-  const topTopics = [...totalsByTopic.entries()]
+  const topSeries = [...totalsBySeries.entries()]
     .sort((a, b) => b[1] - a[1])
-    .slice(0, TOP_N_TOPICS)
-    .map(([topic]) => topic);
-  const topTopicSet = new Set(topTopics);
-  const hasOther = totalsByTopic.size > topTopics.length;
+    .slice(0, TOP_N_SERIES)
+    .map(([key]) => key);
+  const topSeriesSet = new Set(topSeries);
+  const hasOther = totalsBySeries.size > topSeries.length;
 
   const byRace = new Map<number, Record<string, unknown>>();
   for (const r of rows) {
@@ -325,14 +345,156 @@ function buildStackedSeries(rows: Record<string, unknown>[]) {
       byRace.set(sessionKey, { session_key: sessionKey, race: chartRaceLabel(r) });
     }
     const row = byRace.get(sessionKey)!;
-    const topic = String(r.topic_label);
-    const bucket = topTopicSet.has(topic) ? topic : "Other";
+    const key = seriesKey(r);
+    const bucket = topSeriesSet.has(key) ? key : "Other";
     row[bucket] = N(row[bucket]) + N(r.message_count);
   }
 
   const chartData = [...byRace.values()].sort((a, b) => N(a.session_key) - N(b.session_key));
-  const topics = hasOther ? [...topTopics, "Other"] : topTopics;
-  return { chartData, topics };
+  const series = hasOther ? [...topSeries, "Other"] : topSeries;
+  return { chartData, series };
+}
+
+function TopicOverSeason({ season }: { season: Season }) {
+  const topicsQ = useSQLQuery(
+    `
+      select topic_label, sum(message_count) as total_messages
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season))}
+      group by 1
+      order by total_messages desc
+    `,
+    { enabled: season != null },
+  );
+  const topicOptions = Array.isArray(topicsQ.data) ? topicsQ.data : [];
+
+  // Same known-values guard as `entity`/`session` elsewhere in this dive — a
+  // `topic` left over from a previously-selected season (or a crafted link)
+  // shouldn't be trusted just because it's non-null.
+  const [topic, setTopic] = useDiveState<string | null>("topic", null);
+  const knownTopics = new Set(topicOptions.map((row) => String(row.topic_label)));
+  const effectiveTopic =
+    topic != null && knownTopics.has(topic)
+      ? topic
+      : topicOptions.length
+        ? String(topicOptions[0].topic_label)
+        : null;
+
+  const [breakdown, setBreakdown] = useDiveState<"team" | "driver" | "total">(
+    "topicBreakdown",
+    "team",
+  );
+
+  const rowsQ = useSQLQuery(
+    `
+      select
+        session_key,
+        circuit_short_name,
+        session_date,
+        ${breakdown === "total" ? "'Messages'" : breakdown === "team" ? "team_name" : "driver_acronym"} as entity,
+        sum(message_count) as message_count
+      from ${FCT_DRIVER_TOPIC_RACE}
+      ${whereClause(seasonFilter(season), `topic_label = '${effectiveTopic}'`)}
+      group by 1, 2, 3, 4
+      order by session_date
+    `,
+    { enabled: season != null && effectiveTopic != null },
+  );
+  const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
+
+  const { chartData, series } = useMemo(
+    () => buildStackedSeries(rows, (r) => String(r.entity)),
+    [rows],
+  );
+  const totalMessages = rows.reduce((sum, r) => sum + N(r.message_count), 0);
+  const raceCount = new Set(rows.map((r) => N(r.session_key))).size;
+
+  return (
+    <div>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        {topicsQ.isLoading ? (
+          <div className="h-8 w-64 bg-gray-200 animate-pulse rounded" />
+        ) : (
+          <select
+            className="text-sm border rounded px-2 py-1"
+            style={{ color: "#231f20", borderColor: "#ddd" }}
+            value={effectiveTopic ?? ""}
+            onChange={(e) => setTopic(e.target.value)}
+          >
+            {topicOptions.map((row) => (
+              <option key={String(row.topic_label)} value={String(row.topic_label)}>
+                {String(row.topic_label)}
+              </option>
+            ))}
+          </select>
+        )}
+
+        <div className="flex gap-2">
+          {(
+            [
+              ["team", "By team"],
+              ["driver", "By driver"],
+              ["total", "Total"],
+            ] as const
+          ).map(([b, label]) => (
+            <button
+              key={b}
+              onClick={() => setBreakdown(b)}
+              className="text-xs px-2 py-1 rounded"
+              style={{
+                background: breakdown === b ? "#231f20" : "transparent",
+                color: breakdown === b ? "#fff" : "#6a6a6a",
+                border: `1px solid ${breakdown === b ? "#231f20" : "#ddd"}`,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {rowsQ.isLoading ? (
+        <div className="flex items-center gap-2" style={{ color: "#6a6a6a", height: 320 }}>
+          <Loader2 className="animate-spin" size={16} /> Loading topic history…
+        </div>
+      ) : rowsQ.isError ? (
+        <p style={{ color: "#bc1200" }}>Failed to load: {rowsQ.error?.message}</p>
+      ) : chartData.length === 0 ? (
+        <p style={{ color: "#6a6a6a" }}>No radio messages found for this topic.</p>
+      ) : (
+        <>
+          <p className="text-sm mb-2" style={{ color: "#6a6a6a" }}>
+            {totalMessages} messages across {raceCount} races
+          </p>
+          <ResponsiveContainer width="100%" height={340}>
+            <BarChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+              <XAxis
+                dataKey="race"
+                fontSize={11}
+                interval={0}
+                angle={-30}
+                textAnchor="end"
+                height={80}
+                tickMargin={12}
+              />
+              <YAxis fontSize={11} label={{ value: "Radio messages", angle: -90, position: "insideLeft", fontSize: 11 }} />
+              <Tooltip />
+              {breakdown !== "total" && <Legend wrapperStyle={{ fontSize: 11 }} />}
+              {series.map((s, i) => (
+                <Bar
+                  key={s}
+                  dataKey={s}
+                  stackId="entities"
+                  fill={s === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length]}
+                />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        </>
+      )}
+    </div>
+  );
 }
 
 function RaceTopicsDetail({ season }: { season: Season }) {
