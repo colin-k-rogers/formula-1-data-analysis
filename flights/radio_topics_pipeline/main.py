@@ -285,6 +285,12 @@ def report_dive_data():
     """
     log("[3/3] Verifying the Dive's marts")
     con = duckdb.connect("md:")
+    # The Flight container has no local timezone, so DuckDB's TimeZone
+    # setting resolves to 'Etc/Unknown' and handing a TIMESTAMPTZ back to
+    # Python dies in pytz. Pin the session to UTC -- and render session_date
+    # as text below -- so a step that only ever prints these values can't
+    # fail on converting one.
+    con.execute("SET TimeZone = 'UTC'")
     total_sessions, total_messages = con.execute(
         f"SELECT count(DISTINCT session_key), sum(message_count) FROM {DIVE_MART}"
     ).fetchone()
@@ -299,15 +305,19 @@ def report_dive_data():
     log("  most recent sessions the Dive can now chart:")
     recent = con.execute(
         f"""
-        SELECT session_date, country_name, session_name, sum(message_count)
+        SELECT
+            strftime(session_date, '%Y-%m-%d') AS session_day,
+            country_name,
+            session_name,
+            sum(message_count)
         FROM {DIVE_MART}
         GROUP BY ALL
-        ORDER BY session_date DESC
+        ORDER BY session_day DESC
         LIMIT 5
         """
     ).fetchall()
-    for session_date, country, session_name, messages in recent:
-        log(f"    {session_date}  {country} {session_name}  {messages} messages")
+    for session_day, country, session_name, messages in recent:
+        log(f"    {session_day}  {country} {session_name}  {messages} messages")
     con.close()
 
 
