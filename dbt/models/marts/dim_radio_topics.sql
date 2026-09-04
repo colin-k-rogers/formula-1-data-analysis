@@ -6,11 +6,9 @@ overrides as (
     select * from {{ ref('topic_name_overrides') }}
 ),
 
--- topic_id isn't a stable join key -- BERTopic renumbers/reshuffles topics
--- on every FORCE_REFIT, so overrides are matched by keyword content
--- instead (see seeds/topic_name_overrides.csv). A topic's top_keywords
--- could in principle contain more than one override's keyword; keep only
--- the longest (most specific) match so this stays one row per topic_id.
+-- topic_id isn't stable across FORCE_REFIT, so overrides match on keyword
+-- content instead (see seeds/topic_name_overrides.csv). Keep only the
+-- longest match if a topic matches more than one override.
 matched as (
     select
         t.topic_id,
@@ -29,9 +27,7 @@ matched as (
 
 select
     topic_id,
-    -- Falls back to BERTopic's raw keyword-soup label when a topic has no
-    -- curated override yet (e.g. a fresh FORCE_REFIT reshuffled topics
-    -- before the seed was updated for them) instead of showing a blank name.
+    -- Falls back to BERTopic's raw label when no curated override matches yet.
     coalesce(display_name, label) as topic_label,
     top_keywords,
     doc_count

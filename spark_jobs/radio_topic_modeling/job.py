@@ -84,20 +84,14 @@ WHISPER_INITIAL_PROMPT = (
     "car ahead, car behind."
 )
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
-# Driver/team names dominate short radio utterances enough that BERTopic's
-# embeddings cluster messages by WHO is mentioned ("Norris is 8 seconds
-# behind", "Alonso is 15 seconds behind") into separate topics instead of
-# grouping them by the actual theme (race-position/gap updates) they share.
-# That identity is already captured elsewhere in the data model (every
-# message row carries its own driver_number/team), so nothing is lost by
-# stripping names from just the text handed to the topic model -- see
-# build_name_strip_pattern()/anonymize_names() below.
+# Driver/team names dominate short utterances enough that BERTopic clusters
+# by WHO is mentioned instead of the shared theme -- stripped from the text
+# fed to the topic model only (driver_number/team are already columns
+# elsewhere, so no identity is lost). See build_name_strip_pattern() below.
 MIN_NAME_STRIP_LEN = 4
-# Name tokens that double as ordinary English words used in genuine radio
-# topics (e.g. "push to the max", "max attack") -- stripping these would
-# delete real topical content, not just an identity, so they're excluded
-# even though they're a driver's first name. Extend this if a future
-# season's grid introduces another collision.
+# First/last names or team names that double as ordinary racing vocabulary
+# (e.g. "push to the max") -- excluded so stripping names doesn't delete
+# real topical content. Extend if a future grid introduces another collision.
 AMBIGUOUS_NAME_STOPWORDS = {"max"}
 CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "radio")
 ICEBERG_NAMESPACE = os.environ.get("ICEBERG_NAMESPACE", "raw")
@@ -175,10 +169,8 @@ def fetch_team_radio_for_sessions(sessions):
 
 
 def fetch_driver_rosters(sessions):
-    """Driver name/team metadata for the given sessions' grid -- used only
-    to build the name-stripping pattern in build_name_strip_pattern(), never
-    stored. Deduped by name_acronym since the same driver reappears in every
-    session of a season."""
+    """Driver name/team metadata for the given sessions, deduped by
+    name_acronym -- feeds build_name_strip_pattern(), never stored."""
     rosters = []
     seen_acronyms = set()
     for session in sessions:
@@ -192,13 +184,10 @@ def fetch_driver_rosters(sessions):
 
 
 def build_name_strip_pattern(driver_rosters):
-    """Compiles a single case-insensitive, word-boundary regex matching any
-    driver's first/last name or team name from `driver_rosters`, for
-    anonymize_names() to strip out of text before it reaches the topic
-    model. Short and ambiguous tokens (see MIN_NAME_STRIP_LEN,
-    AMBIGUOUS_NAME_STOPWORDS) are excluded so real vocabulary isn't
-    collateral damage. Returns None if there's nothing to strip, so callers
-    can skip anonymization entirely (e.g. no sessions found this run)."""
+    """Compiles a case-insensitive, word-boundary regex matching any driver
+    first/last name or team name from `driver_rosters` (excluding short/
+    ambiguous tokens -- see MIN_NAME_STRIP_LEN, AMBIGUOUS_NAME_STOPWORDS).
+    Returns None if there's nothing to strip."""
     tokens = set()
     for d in driver_rosters:
         candidates = [d.get("first_name"), d.get("last_name"), d.get("team_name")]
@@ -215,9 +204,8 @@ def build_name_strip_pattern(driver_rosters):
 
 def anonymize_names(text, name_strip_pattern):
     """Strips driver/team names out of `text` for topic-modeling purposes
-    only (the original transcript_text is never overwritten). Falls back to
-    the original text if stripping would leave nothing (e.g. a message that
-    is just a driver's name) rather than handing BERTopic a blank string."""
+    only (transcript_text itself is never touched). Falls back to the
+    original text if stripping would leave nothing."""
     if name_strip_pattern is None or not text:
         return text
     stripped, n_subs = name_strip_pattern.subn("", text)
@@ -283,33 +271,23 @@ def transcribe_partition(rows):
             # for quiet/noisy audio specifically. A wrong-but-plausible
             # transcript is worse for topic modeling than an English
             # transcript that's merely poor.
-            # Some "radio calls" run minutes long with mostly dead air (a
-            # channel left open post-race, say) — without vad_filter,
-            # Whisper has to decode that silence as if it were speech, and
-            # it reliably resolves that into the same sentence hallucinated
-            # over and over rather than recognizing there's nothing there.
-            # condition_on_previous_text=False stops that loop from feeding
-            # on its own prior (wrong) output once it starts, and costs
-            # nothing here since each clip is an independent utterance with
-            # no real cross-segment context to lose. Confirmed against a
-            # real 191s clip that decoded as 7x the same sentence without
-            # this and as varied, coherent speech with it.
+            # Some clips run minutes long with mostly dead air; without
+            # vad_filter, Whisper decodes the silence as speech and loops on
+            # the same hallucinated sentence. condition_on_previous_text=False
+            # stops it feeding on its own prior output once that starts, and
+            # costs nothing since each clip has no real cross-segment context.
             segments, info = model.transcribe(
                 audio_buf, beam_size=5, language="en", initial_prompt=WHISPER_INITIAL_PROMPT,
                 vad_filter=True, condition_on_previous_text=False,
             )
             text = " ".join(seg.text.strip() for seg in segments).strip()
             if not text:
-                # vad_filter occasionally (non-deterministically -- a
+                # vad_filter occasionally (nondeterministically -- a
                 # numerical edge case in faster-whisper's feature extractor
-                # on long, mostly-silent audio, confirmed by re-running the
-                # exact same clip locally and getting a real transcript on
-                # some runs and zero detected speech on others) decides an
-                # entire clip has no speech in it even when it does. Retry
-                # once without VAD rather than silently losing the message
-                # to that flakiness -- worst case this falls back to the
-                # pre-VAD repetition-loop hallucination on these rare
-                # clips, which is still strictly better than no transcript.
+                # on long, silent audio) decides a clip has no speech when it
+                # does. Retry without VAD rather than lose the transcript --
+                # worst case this reverts to the pre-VAD hallucination loop,
+                # still better than nothing.
                 segments, info = model.transcribe(
                     io.BytesIO(resp.content), beam_size=5, language="en",
                     initial_prompt=WHISPER_INITIAL_PROMPT, condition_on_previous_text=False,
@@ -396,12 +374,10 @@ def _assignments_frame(radio_message_ids, topics, probabilities):
     })
 
 
-# Deliberately curated, not a general dedup pass: each group is a set of
-# keywords that name the SAME radio call/theme in different words, verified
-# by reading actual transcripts (e.g. "box, box, this lap" and "why do we
-# pit if we undercut" are both the pit-stop call). Getting a group wrong
-# would silently conflate two genuinely different topics, so only add one
-# after checking sample transcripts, the way this one was checked.
+# Deliberately curated, not a general dedup pass: each group names the SAME
+# radio call in different words, verified against real transcripts. Getting
+# a group wrong silently conflates two different topics, so only add one
+# after checking sample transcripts.
 SYNONYM_MERGE_GROUPS = [
     ["box", "pit"],
 ]
@@ -438,12 +414,10 @@ def merge_synonym_topics(topic_model, docs):
 
 
 def fit_topics_fresh(docs_pdf, embedding_model):
-    """Fits a brand-new BERTopic model over `docs_pdf` (radio_message_id,
-    transcript_text, model_text) — used for the very first run ever
-    (nothing to load from MODEL_STORE_PATH yet) and for a deliberate
-    FORCE_REFIT. Clusters/labels are computed from model_text (the
-    name-anonymized copy of transcript_text — see anonymize_names()), not
-    transcript_text itself. Returns (assignments, topics, fitted_model)."""
+    """Fits a brand-new BERTopic model over `docs_pdf` -- used for the very
+    first run ever and for a deliberate FORCE_REFIT. Clusters/labels are
+    computed from model_text (anonymized copy of transcript_text -- see
+    anonymize_names()). Returns (assignments, topics, fitted_model)."""
     from bertopic import BERTopic
     from bertopic.representation import KeyBERTInspired
     from sklearn.feature_extraction.text import CountVectorizer
@@ -481,12 +455,9 @@ def fit_topics_fresh(docs_pdf, embedding_model):
         vectorizer_model=vectorizer_model,
         representation_model=representation_model,
         min_topic_size=25,
-        # Runs BERTopic's built-in post-fit merge: topics whose c-TF-IDF
-        # (keyword-count) vectors are highly similar get combined into one.
-        # This only catches topics that already share vocabulary, though —
-        # a "box box" topic and a "pit stop" topic describe the exact same
-        # radio call but share almost no words, so this alone won't merge
-        # them; see merge_synonym_topics() below for that case.
+        # Auto-merges topics with similar c-TF-IDF vectors post-fit -- only
+        # catches shared vocabulary, so lexically-distinct synonyms (see
+        # merge_synonym_topics() below) still need a separate pass.
         nr_topics="auto",
         calculate_probabilities=True,
     )
@@ -661,12 +632,9 @@ def main():
         print(f"season={season_year} sessions_processed={len(sessions_to_process)} messages={n_new_messages} — no successful transcriptions to topic-model.")
         return
 
-    # Best-effort roster for THIS run's season_year -- covers the vast
-    # majority of name mentions (current teammates/rivals), though a
-    # FORCE_REFIT over a multi-season corpus won't have older seasons'
-    # rosters unless a prior run already fetched them. Good enough: it
-    # still fixes the problem going forward without persisting a whole
-    # separate driver-name store alongside MODEL_STORE_PATH.
+    # Best-effort: scoped to this run's season_year, so a multi-season
+    # FORCE_REFIT won't have older seasons' rosters. Still an improvement
+    # over no anonymization, without a separate persisted driver-name store.
     driver_rosters = fetch_driver_rosters(all_sessions) if all_sessions else []
     name_strip_pattern = build_name_strip_pattern(driver_rosters)
     docs_pdf["model_text"] = docs_pdf["transcript_text"].map(lambda t: anonymize_names(t, name_strip_pattern))
