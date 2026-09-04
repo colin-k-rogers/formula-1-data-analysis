@@ -1,0 +1,38 @@
+schemaVersion: 1
+name: radio-topics-pipeline
+title: Radio Topics Pipeline
+description: >-
+  On-demand Flight that runs the whole radio-topics pipeline end to end:
+  submits the EMR Serverless job run (Whisper transcription + BERTopic
+  topic modeling), waits for it to succeed, builds the radio dbt lineage,
+  and reports the session/message counts now in fct_driver_topic_race.
+
+variables:
+  season_year:
+    description: F1 season to process.
+    default: "2026"
+
+resources:
+  flights:
+    pipeline:
+      name: f1-radio-topics-pipeline
+      source: main.py
+      requirements: requirements.txt
+      # On-demand only — no scheduleCron. Kicked off manually once a race
+      # weekend's radio is ready to transcribe.
+      maxRuntimeSec: 5400
+      # Never auto-run on deploy: this submits a real (billed) EMR
+      # Serverless job run.
+      runOnDeploy: false
+      secrets:
+        - aws_emr
+      config:
+        SEASON_YEAR: ${var.season_year}
+        CATALOG_NAME: radio
+        WHISPER_MODEL_SIZE: medium
+        AWS_REGION: us-east-1
+        BUCKET_NAME: f1-radio-topics-lakehouse
+        EMR_APPLICATION_ID: "00g8dvj9kjj0o709"
+      targets:
+        preview:
+          name: f1-radio-topics-pipeline:${target.branch} (Preview)
