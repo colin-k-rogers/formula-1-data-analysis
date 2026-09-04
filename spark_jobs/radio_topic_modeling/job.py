@@ -99,6 +99,11 @@ ICEBERG_NAMESPACE = os.environ.get("ICEBERG_NAMESPACE", "raw")
 # s3://bucket/models/bertopic/model.tar.gz. Without this set, every run
 # fits fresh (same as FORCE_REFIT=true) since there's nothing to load.
 MODEL_STORE_PATH = os.environ.get("MODEL_STORE_PATH")
+# Bump whenever a change alters what the persisted model was fit ON (e.g.
+# anonymized vs. raw text) -- load_persisted_topic_model() treats a version
+# mismatch the same as "nothing persisted yet" and fits fresh instead of
+# transform()-ing new documents into a model built under different rules.
+MODEL_SCHEMA_VERSION = "2"
 FORCE_REFIT = os.environ.get("FORCE_REFIT", "false").lower() == "true"
 REPROCESS_SESSIONS = {
     int(s) for s in os.environ.get("REPROCESS_SESSIONS", "").split(",") if s.strip()
@@ -168,13 +173,13 @@ def fetch_team_radio_for_sessions(sessions):
     return radio_messages
 
 
-def fetch_driver_rosters(sessions):
-    """Driver name/team metadata for the given sessions, deduped by
+def fetch_driver_rosters(session_keys):
+    """Driver name/team metadata for the given session_keys, deduped by
     name_acronym -- feeds build_name_strip_pattern(), never stored."""
     rosters = []
     seen_acronyms = set()
-    for session in sessions:
-        for d in fetch("drivers", {"session_key": session["session_key"]}):
+    for session_key in session_keys:
+        for d in fetch("drivers", {"session_key": session_key}):
             acronym = d.get("name_acronym")
             if acronym and acronym not in seen_acronyms:
                 seen_acronyms.add(acronym)
@@ -314,21 +319,36 @@ def _split_s3_uri(uri):
     return bucket, key
 
 
+def _model_version_key(key):
+    return f"{key}.version"
+
+
 def load_persisted_topic_model(embedding_model):
     """Loads the BERTopic model a prior run saved to MODEL_STORE_PATH, so
     this run can assign new documents into that SAME topic space via
     transform() instead of fitting a new, incompatible one. Returns None if
-    MODEL_STORE_PATH isn't configured or nothing's been saved yet (the
-    caller treats that the same as "first run ever": fit fresh)."""
+    MODEL_STORE_PATH isn't configured, nothing's been saved yet, or what's
+    saved was fit under a different MODEL_SCHEMA_VERSION (the caller treats
+    all of these the same as "first run ever": fit fresh)."""
     if not MODEL_STORE_PATH:
         return None
     from bertopic import BERTopic
 
     bucket, key = _split_s3_uri(MODEL_STORE_PATH)
+    s3 = boto3.client("s3")
+    try:
+        version_obj = s3.get_object(Bucket=bucket, Key=_model_version_key(key))
+        if version_obj["Body"].read().decode() != MODEL_SCHEMA_VERSION:
+            return None
+    except botocore.exceptions.ClientError as err:
+        if err.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+            return None
+        raise
+
     with tempfile.TemporaryDirectory() as tmp:
         archive_path = os.path.join(tmp, "model.tar.gz")
         try:
-            boto3.client("s3").download_file(bucket, key, archive_path)
+            s3.download_file(bucket, key, archive_path)
         except botocore.exceptions.ClientError as err:
             if err.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
                 return None
@@ -340,9 +360,10 @@ def load_persisted_topic_model(embedding_model):
 
 
 def save_topic_model(topic_model):
-    """Persists a freshly fit BERTopic model to MODEL_STORE_PATH for a
-    later run's load_persisted_topic_model() to pick up. No-op if
-    MODEL_STORE_PATH isn't configured (every run just fits fresh instead)."""
+    """Persists a freshly fit BERTopic model (and its MODEL_SCHEMA_VERSION)
+    to MODEL_STORE_PATH for a later run's load_persisted_topic_model() to
+    pick up. No-op if MODEL_STORE_PATH isn't configured (every run just
+    fits fresh instead)."""
     if not MODEL_STORE_PATH:
         return
     bucket, key = _split_s3_uri(MODEL_STORE_PATH)
@@ -355,7 +376,9 @@ def save_topic_model(topic_model):
         archive_path = os.path.join(tmp, "model.tar.gz")
         with tarfile.open(archive_path, "w:gz") as tar:
             tar.add(save_dir, arcname=".")
-        boto3.client("s3").upload_file(archive_path, bucket, key)
+        s3 = boto3.client("s3")
+        s3.upload_file(archive_path, bucket, key)
+        s3.put_object(Bucket=bucket, Key=_model_version_key(key), Body=MODEL_SCHEMA_VERSION.encode())
 
 
 def _assignments_frame(radio_message_ids, topics, probabilities):
@@ -387,11 +410,15 @@ def _topic_ids_matching_keyword(topic_info, keyword):
     """Ids of topics (excluding -1, the outlier bucket) whose top keywords
     include `keyword` as a whole word — lets merge_synonym_topics() locate
     topics by content instead of by id, since ids/counts shift on every
-    refit."""
+    refit. Matches `keyword` as a whole word WITHIN each (possibly
+    multi-word) representation phrase, e.g. "pit" matches "pit stop" -- a
+    plain `keyword in representation` membership check would miss that,
+    since representation entries are rarely single bare words."""
+    pattern = re.compile(rf"\b{re.escape(keyword)}\b")
     return [
         topic_id
         for topic_id, representation in zip(topic_info["Topic"], topic_info["Representation"])
-        if topic_id != -1 and keyword in (kw.lower() for kw in representation)
+        if topic_id != -1 and any(pattern.search(kw.lower()) for kw in representation)
     ]
 
 
@@ -462,14 +489,16 @@ def fit_topics_fresh(docs_pdf, embedding_model):
         calculate_probabilities=True,
     )
     docs = docs_pdf["model_text"].tolist()
-    topics, probabilities = topic_model.fit_transform(docs)
+    topic_model.fit_transform(docs)
     merge_synonym_topics(topic_model, docs)
 
     topic_info = topic_model.get_topic_info()  # columns: Topic, Count, Name, Representation, ...
-    # merge_synonym_topics (if it merged anything) only updates
-    # topic_model.topics_, not the `topics` array fit_transform returned —
-    # read the post-merge assignment from there instead.
-    assignments = _assignments_frame(docs_pdf["radio_message_id"], topic_model.topics_, probabilities)
+    # merge_synonym_topics (if it merged anything) updates topic_model's
+    # topics_/probabilities_ in place (BERTopic's merge_topics sums the
+    # probability columns of merged topics together) -- read both from
+    # there, not the pre-merge `topics`/`probabilities` fit_transform
+    # returned, so topic_id and topic_probability stay consistent.
+    assignments = _assignments_frame(docs_pdf["radio_message_id"], topic_model.topics_, topic_model.probabilities_)
     topics_out = pd.DataFrame({
         "topic_id": topic_info["Topic"],
         "label": topic_info["Name"],
@@ -632,10 +661,20 @@ def main():
         print(f"season={season_year} sessions_processed={len(sessions_to_process)} messages={n_new_messages} — no successful transcriptions to topic-model.")
         return
 
-    # Best-effort: scoped to this run's season_year, so a multi-season
-    # FORCE_REFIT won't have older seasons' rosters. Still an improvement
-    # over no anonymization, without a separate persisted driver-name store.
-    driver_rosters = fetch_driver_rosters(all_sessions) if all_sessions else []
+    if topic_model is None:
+        # A fresh fit trains on the WHOLE historical corpus (potentially
+        # several seasons), so the roster needs every session ever
+        # ingested -- scoping it to just this run's season would leave
+        # older seasons' driver names un-stripped in the same fit.
+        roster_session_keys = {
+            row["session_key"]
+            for row in spark.sql(f"SELECT DISTINCT session_key FROM {messages_table}").collect()
+        }
+    else:
+        # transform() only assigns this run's (re)transcribed sessions into
+        # the existing topic space, so only their drivers need to be here.
+        roster_session_keys = {s["session_key"] for s in sessions_to_process}
+    driver_rosters = fetch_driver_rosters(roster_session_keys) if roster_session_keys else []
     name_strip_pattern = build_name_strip_pattern(driver_rosters)
     docs_pdf["model_text"] = docs_pdf["transcript_text"].map(lambda t: anonymize_names(t, name_strip_pattern))
 
