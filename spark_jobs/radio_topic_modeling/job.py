@@ -159,7 +159,7 @@ def fetch_target_sessions(season_year):
     """All Race, Qualifying, and Sprint sessions for `season_year` (metadata
     only — cheap, and safe to call every run since it's just used to
     discover which sessions exist, not to fetch their radio). Cancelled
-    sessions have no radio data at all (same reason ingest_openf1 skips them
+    sessions have no radio data at all (same reason ingest-openf1 skips them
     for laps), so skip them too."""
     all_sessions = fetch("sessions", {"year": season_year})
     return [

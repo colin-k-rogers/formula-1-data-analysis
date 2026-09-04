@@ -3,6 +3,7 @@ name: Deploy Blueprints
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -233,10 +234,7 @@ jobs:
         with:
           script: |
             const marker = '<!-- preview-blueprints-comment -->';
-            const body = `${marker}
-            ### Preview Blueprints
-
-            ${process.env.COMMENT_BODY ?? ''}`.replace(/^ +/gm, '');
+            const body = `${marker}\n### Preview Blueprints\n\n${process.env.COMMENT_BODY ?? ''}`;
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,

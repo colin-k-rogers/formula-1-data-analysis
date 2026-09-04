@@ -22,3 +22,7 @@ resources:
         preview:
           name: f1-transform-dbt:${target.branch} (Preview)
           scheduleCron: ""
+          # So a manually-triggered preview run builds this branch's dbt/
+          # project instead of silently building main's.
+          config:
+            GITHUB_REF: ${target.branch}

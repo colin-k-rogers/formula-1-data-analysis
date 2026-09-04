@@ -7,11 +7,6 @@ description: >-
   refreshed session), so it also picks up corrections OpenF1 publishes after
   the fact.
 
-variables:
-  season_year:
-    description: F1 season to ingest.
-    default: "2026"
-
 resources:
   flights:
     ingest:

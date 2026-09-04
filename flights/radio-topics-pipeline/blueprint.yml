@@ -7,11 +7,6 @@ description: >-
   topic modeling), waits for it to succeed, builds the radio dbt lineage,
   and reports the session/message counts now in fct_driver_topic_race.
 
-variables:
-  season_year:
-    description: F1 season to process.
-    default: "2026"
-
 resources:
   flights:
     pipeline:
@@ -36,3 +31,7 @@ resources:
       targets:
         preview:
           name: f1-radio-topics-pipeline:${target.branch} (Preview)
+          # So a manually-triggered preview run builds this branch's dbt/
+          # project instead of silently building main's.
+          config:
+            GITHUB_REF: ${target.branch}

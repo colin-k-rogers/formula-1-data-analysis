@@ -28,14 +28,14 @@ install-deploy: $(CLI) ## Install CLI with live MotherDuck deploy dependencies
 	.venv/bin/python -m pip install "md-blueprints[deploy] @ $(CLI_SOURCE)"
 
 .PHONY: preview
-preview: ## Preview a blueprint Dive locally (e.g. make preview wikipedia-pageviews)
+preview: $(CLI) ## Preview a blueprint Dive locally (e.g. make preview wikipedia-pageviews)
 	@test -n "$(ARG)" || { echo "Usage: make preview <blueprint-name>"; exit 1; }
 	@SOURCE="$$( $(CLI) dive-source --blueprints "$(ARG)" $(if $(DIVE),--dive "$(DIVE)") )"; \
 	  echo "export { default, REQUIRED_DATABASES } from \"../../$${SOURCE%.tsx}\";" > .dive-preview/src/dive.tsx
 	cd .dive-preview && npm run dev
 
 .PHONY: preview-smoke
-preview-smoke: ## Build a blueprint Dive preview without starting a dev server
+preview-smoke: $(CLI) ## Build a blueprint Dive preview without starting a dev server
 	@test -n "$(ARG)" || { echo "Usage: make preview-smoke <blueprint-name>"; exit 1; }
 	@SOURCE="$$( $(CLI) dive-source --blueprints "$(ARG)" $(if $(DIVE),--dive "$(DIVE)") )"; \
 	  echo "export { default, REQUIRED_DATABASES } from \"../../$${SOURCE%.tsx}\";" > .dive-preview/src/dive.tsx
