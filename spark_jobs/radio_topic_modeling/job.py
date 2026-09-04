@@ -145,16 +145,27 @@ def fetch(endpoint, params):
     raise RuntimeError(f"GET {url} params={params} failed after {total_attempts} attempts") from last_err
 
 
-def fetch_race_sessions(season_year):
-    """All Race sessions for `season_year` (metadata only — cheap, and safe
-    to call every run since it's just used to discover which sessions
-    exist, not to fetch their radio). Cancelled races have no radio data at
-    all (same reason ingest_openf1 skips them for laps), so skip them too."""
-    all_race_type_sessions = fetch("sessions", {"year": season_year, "session_type": "Race"})
+# OpenF1 `session_name` values whose team radio gets transcribed. Deliberately
+# excludes practice sessions (low-signal, mostly engineering chatter) and
+# "Sprint Qualifying"/"Sprint Shootout" (the short knockout session that sets
+# the sprint grid, not what's usually meant by a weekend's "qualifying").
+# Fetched without a `session_type` filter because Sprint shares its
+# session_type ("Race") with the Race session itself -- session_name is the
+# only field that actually distinguishes them.
+TARGET_SESSION_NAMES = {"Race", "Qualifying", "Sprint"}
+
+
+def fetch_target_sessions(season_year):
+    """All Race, Qualifying, and Sprint sessions for `season_year` (metadata
+    only — cheap, and safe to call every run since it's just used to
+    discover which sessions exist, not to fetch their radio). Cancelled
+    sessions have no radio data at all (same reason ingest_openf1 skips them
+    for laps), so skip them too."""
+    all_sessions = fetch("sessions", {"year": season_year})
     return [
         s
-        for s in all_race_type_sessions
-        if s.get("session_name") == "Race" and not s.get("is_cancelled")
+        for s in all_sessions
+        if s.get("session_name") in TARGET_SESSION_NAMES and not s.get("is_cancelled")
     ]
 
 
@@ -581,7 +592,7 @@ def main():
             ).collect()
         }
 
-    all_sessions = fetch_race_sessions(season_year)
+    all_sessions = fetch_target_sessions(season_year)
     sessions_to_process = [
         s for s in all_sessions
         if REPROCESS_ALL
