@@ -16,3 +16,10 @@
   (e.g. to check for drift), use `get_flight`/`read_dive` and reconcile any
   difference into the repo file rather than assuming the repo copy is
   current.
+- Keep code comments as short as they can be while still earning their place.
+  Comment the non-obvious: why a value is what it is, a workaround and what
+  forced it, a constraint the next reader would otherwise trip over. Don't
+  restate what the code already says.
+- Anything explained in `README.md` — setup, config keys, how the pieces fit
+  together — lives there only. Point at it from the code instead of repeating
+  it, so the two can't drift apart.

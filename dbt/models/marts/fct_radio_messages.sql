@@ -48,6 +48,7 @@ select
     se.country_name,
     se.circuit_short_name,
     se.meeting_official_name,
+    se.session_name,
     se.date_start as session_date,
     m.driver_number,
     d.full_name as driver_full_name,

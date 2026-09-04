@@ -145,6 +145,13 @@ def needs_refresh(session, already_have, now):
     return abs(now - finished_at) <= RECENCY_WINDOW
 
 
+def refresh_keys_for(con, table, candidate_sessions, now):
+    """session_keys among `candidate_sessions` worth (re-)fetching fresh
+    f1.raw.<table> data for."""
+    already_have = sessions_with_rows(con, table)
+    return [s["session_key"] for s in candidate_sessions if needs_refresh(s, already_have, now)]
+
+
 def main():
     season_year = os.environ.get("SEASON_YEAR", "2026")
 
@@ -174,24 +181,16 @@ def main():
     con = duckdb.connect("md:")
     now = datetime.now(timezone.utc)
 
-    # Driver rosters matter for every target session type -- a Qualifying or
-    # Sprint radio message needs driver_number -> name/team just as much as
-    # a Race one does -- so refresh them incrementally across all of
-    # `sessions`, not just Race.
-    already_have_drivers = sessions_with_rows(con, "drivers")
-    driver_refresh_sessions = [s for s in sessions if needs_refresh(s, already_have_drivers, now)]
-    driver_refresh_keys = [s["session_key"] for s in driver_refresh_sessions]
-
-    # Lap-by-lap pace comparison (fct_lap_pace / the Relative Lap Pace dive)
-    # is deliberately Race-only: Qualifying is flying laps with no stable
-    # "gap to the field" and Sprint is a shorter, differently-fueled race
-    # distance, neither comparable lap-for-lap to Race pace. Keep laps
-    # ingestion scoped to Race sessions only so that dive's scope doesn't
-    # silently change underneath it.
-    race_sessions = [s for s in sessions if s.get("session_name") == "Race"]
-    already_have_laps = sessions_with_rows(con, "laps")
-    lap_refresh_sessions = [s for s in race_sessions if needs_refresh(s, already_have_laps, now)]
-    lap_refresh_keys = [s["session_key"] for s in lap_refresh_sessions]
+    # Drivers and laps both matter for every target session type now -- a
+    # Qualifying or Sprint radio message needs driver_number -> name/team
+    # just as much as a Race one does, and fct_radio_messages needs a lap
+    # number for those sessions too. Each table still gets its own
+    # incremental refresh (a session can need one refreshed without the
+    # other), but both draw from the same candidate pool. Race-only scoping
+    # for lap-pace comparison (fct_lap_pace / the Relative Lap Pace dive) is
+    # enforced in that mart itself, not here -- see fct_lap_pace.sql.
+    driver_refresh_keys = refresh_keys_for(con, "drivers", sessions, now)
+    lap_refresh_keys = refresh_keys_for(con, "laps", sessions, now)
 
     drivers = []
     for session_key in driver_refresh_keys:
@@ -220,7 +219,7 @@ def main():
         f"season={season_year} sessions={n_sessions} meetings={n_meetings} "
         f"drivers={n_drivers} laps={n_laps} "
         f"drivers_refreshed={len(driver_refresh_keys)}/{len(session_keys)} "
-        f"laps_refreshed={len(lap_refresh_keys)}/{len(race_sessions)} sessions"
+        f"laps_refreshed={len(lap_refresh_keys)}/{len(session_keys)} sessions"
     )
 
 

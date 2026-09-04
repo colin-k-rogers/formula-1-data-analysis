@@ -2,8 +2,18 @@
 -- the fastest and median lap turned by the whole field on that same lap of
 -- that same session, so drivers are compared under identical track/weather
 -- conditions rather than across the whole race distance.
+--
+-- Race sessions only: Qualifying is flying laps with no stable "gap to the
+-- field", and Sprint is a shorter, differently-fueled race distance -- neither
+-- is comparable lap-for-lap to Race pace. Filtered here, in the mart that
+-- actually needs the invariant, rather than relied upon staying true of
+-- fct_laps/f1.raw.laps upstream (which now also carries Qualifying/Sprint
+-- laps for fct_radio_messages's lap-number lookups).
 with laps as (
-    select * from {{ ref('fct_laps') }}
+    select l.*
+    from {{ ref('fct_laps') }} l
+    join {{ ref('dim_sessions') }} se on l.session_key = se.session_key
+    where se.session_name = 'Race'
 ),
 
 lap_stats as (
