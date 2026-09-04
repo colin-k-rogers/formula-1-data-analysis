@@ -1,0 +1,42 @@
+name: Tests
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Deliberately unfiltered by path, unlike deploy_blueprints.yaml: this is meant
+# to be a required status check, and a check that's skipped on some PRs can't be.
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  dive-sources:
+    name: Dive Source Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: .dive-preview/package-lock.json
+
+      # `npm ci --ignore-scripts` would skip esbuild's postinstall, which is
+      # what puts its platform binary in place, so let the scripts run.
+      - name: Install test dependencies
+        working-directory: .dive-preview
+        run: npm ci
+
+      - name: Run dive source tests
+        working-directory: .dive-preview
+        run: npm test

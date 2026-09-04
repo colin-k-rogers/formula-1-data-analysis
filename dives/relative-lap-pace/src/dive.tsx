@@ -13,9 +13,11 @@ import {
 } from "recharts";
 import { Loader2 } from "lucide-react";
 
-export const REQUIRED_DATABASES = [
-  { type: "database", path: "md:f1", alias: "f1" },
-];
+// Must stay on one line — the Blueprints deployer strips this declaration with
+// a single-line regex when it uploads the source, and blueprint.yml's
+// requiredResources is what MotherDuck actually mounts. A multi-line form
+// leaves the array body behind as a syntax error. Guarded by `make test`.
+export const REQUIRED_DATABASES = [{ type: "database", path: "md:f1", alias: "f1" }];
 
 const N = (v: unknown): number => (v != null ? Number(v) : 0);
 

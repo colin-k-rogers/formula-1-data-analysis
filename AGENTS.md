@@ -23,6 +23,11 @@
   pending change even if nothing has touched its files in git recently. It's
   a spot-check surfaced for a human to read, not an automatic pass/fail gate,
   so still don't rely on it instead of following the rule above.
+- A Dive's `export const REQUIRED_DATABASES = …` must stay on a single line:
+  the deployer strips that declaration with a single-line regex, so a wrapped
+  one deploys a Dive whose leftover array body is a syntax error. `make test`
+  and the `Tests` workflow catch it on every PR — run `make test` after
+  touching anything under `dives/**`.
 - Keep code comments as short as they can be while still earning their place.
   Comment the non-obvious: why a value is what it is, a workaround and what
   forced it, a constraint the next reader would otherwise trip over. Don't
