@@ -1,20 +1,11 @@
 #!/usr/bin/env bash
-# Creates the IAM user the f1-radio-topics-pipeline Flight
-# (../flights/radio_topics_pipeline) authenticates as to submit and poll the
-# EMR Serverless job run.
+# Creates the IAM user the f1-radio-topics-pipeline Flight submits EMR
+# Serverless job runs as -- see the README section on that Flight for why
+# it's separate from setup_iam_user.sh's read-only reader. MotherDuck runs
+# outside AWS, so it needs a static key pair, not an assumable role.
 #
-# This is a *second*, separate user from the one setup_iam_user.sh creates:
-# that one is read-only Glue/S3 so MotherDuck can attach the Iceberg catalog
-# (see setup_radio_lakehouse.sql), and deliberately can't start anything.
-# Submitting a job run needs StartJobRun/GetJobRun plus PassRole on the job
-# runtime role, so it gets its own user and its own key pair rather than
-# widening the reader's policy. As with that user, MotherDuck runs outside
-# AWS and needs a static key pair, not an assumable role.
-#
-# Reuses ../spark_jobs/radio_topic_modeling/.env (ACCOUNT_ID/REGION) and
-# state.sh (APP_ID) -- run that job's setup.sh first.
-#
-# Run this once:
+# Reads ../spark_jobs/radio_topic_modeling/.env and state.sh, so run that
+# job's setup.sh first. Run this once:
 #   ./setup_flight_submitter_iam_user.sh
 set -euo pipefail
 export AWS_PAGER=""
@@ -46,13 +37,9 @@ else
     echo "Created IAM user: $USER_NAME"
 fi
 
-# Scoped to this one application: the Flight can start and watch job runs on
-# it and nothing else. GetApplication is what start_job_run itself calls to
-# resolve the application before submitting.
-#
-# PassRole is the permission that actually lets a job run assume the runtime
-# role, so it's the one worth keeping tight: this user may hand exactly that
-# role to exactly EMR Serverless, and to no other service.
+# GetApplication is what start_job_run itself calls before submitting.
+# PassRole is what lets a job run assume the runtime role, so it's kept
+# tight: exactly that role, handed to exactly EMR Serverless.
 cat > /tmp/flight-submitter-policy.json <<EOF
 {
   "Version": "2012-10-17",
@@ -81,8 +68,7 @@ cat > /tmp/flight-submitter-policy.json <<EOF
 }
 EOF
 if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
-    # Same versioning dance as setup_iam_user.sh -- policies can't be edited
-    # in place, and cap out at 5 versions.
+    # As in setup_iam_user.sh: policies can't be edited in place, cap of 5.
     VERSION_COUNT=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query 'length(Versions)' --output text)
     if [ "$VERSION_COUNT" -ge 5 ]; then
         OLDEST_VERSION=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" \
