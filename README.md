@@ -24,6 +24,7 @@ Every Flight and Dive is a [MotherDuck Blueprint](https://github.com/motherduckd
 
 [GitHub Actions](.github/workflows/deploy_blueprints.yaml) deploys every Flight and Dive using [MotherDuck Blueprints](https://github.com/motherduckdb/motherduck-blueprints):
 
+- **Every pull request** runs the Dive source tests ([.github/workflows/tests.yaml](.github/workflows/tests.yaml), or `make test` locally). They compile each `dives/*/src/dive.tsx` both as written and as the deployer uploads it — the deployer strips the `export const REQUIRED_DATABASES = …` declaration with a single-line regex, so a declaration wrapped over several lines deploys a Dive whose remaining array body is a syntax error.
 - **Pull requests** that touch `flights/**` or `dives/**` get a branch-scoped preview deploy (schedules disabled, Dives forced to `draft`) with a plan comment on the PR.
 - **Merging to `main`** deploys the changed Flights/Dives to production through the `motherduck-production` GitHub Environment, which requires manual approval.
 - Closing/deleting a preview branch cleans up its preview resources automatically.
@@ -33,7 +34,7 @@ One-time repo setup (not done by this automation — see [docs/setup-your-reposi
 1. Add a `MOTHERDUCK_TOKEN` repository secret — a MotherDuck **service account** token, not a personal one, so CI-deployed resources are owned by automation.
 2. Create a `motherduck-production` GitHub Environment with required reviewers.
 
-Local commands (`make setup`, `make validate`, `make preview-smoke <blueprint>`, etc. — see the [Makefile](Makefile)) need Python 3.10+ as `python3` on `PATH`.
+Local commands (`make setup`, `make validate`, `make test`, `make preview-smoke <blueprint>`, etc. — see the [Makefile](Makefile)) need Python 3.10+ as `python3` on `PATH`; the Dive tests additionally need Node 22+.
 
 ## Radio topic modeling
 
