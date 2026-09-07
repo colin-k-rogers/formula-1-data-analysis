@@ -89,10 +89,22 @@ EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2"
 # fed to the topic model only (driver_number/team are already columns
 # elsewhere, so no identity is lost). See build_name_strip_pattern() below.
 MIN_NAME_STRIP_LEN = 4
-# First/last names or team names that double as ordinary racing vocabulary
-# (e.g. "push to the max") -- excluded so stripping names doesn't delete
-# real topical content. Extend if a future grid introduces another collision.
-AMBIGUOUS_NAME_STOPWORDS = {"max"}
+# Name tokens that also read as ordinary racing vocabulary, mapped to the only
+# contexts where the vocabulary reading holds -- anywhere else they're stripped
+# like any other name, even when shorter than MIN_NAME_STRIP_LEN. Excluding
+# "max" outright instead kept 215 vocative "Max, ..." calls for the sake of the
+# 2 real ones in the corpus, enough for BERTopic to cluster one driver's radio
+# as its own pseudo-topic. Adjacency to "push" is deliberately not a keep
+# context: "push on Max", "keep pushing, Max is four seconds back" are the
+# name, not "push to the max".
+AMBIGUOUS_NAME_KEEP_CONTEXTS = {
+    "max": r"\b(?:to\s+the|at|the)\s+max\b",
+}
+AMBIGUOUS_NAME_KEEP_PATTERN = (
+    re.compile("|".join(AMBIGUOUS_NAME_KEEP_CONTEXTS.values()), re.IGNORECASE)
+    if AMBIGUOUS_NAME_KEEP_CONTEXTS
+    else None
+)
 CATALOG_NAME = os.environ.get("ICEBERG_CATALOG_NAME", "radio")
 ICEBERG_NAMESPACE = os.environ.get("ICEBERG_NAMESPACE", "raw")
 # Where the fitted BERTopic model is persisted between runs, e.g.
@@ -103,7 +115,7 @@ MODEL_STORE_PATH = os.environ.get("MODEL_STORE_PATH")
 # anonymized vs. raw text) -- load_persisted_topic_model() treats a version
 # mismatch the same as "nothing persisted yet" and fits fresh instead of
 # transform()-ing new documents into a model built under different rules.
-MODEL_SCHEMA_VERSION = "2"
+MODEL_SCHEMA_VERSION = "3"
 FORCE_REFIT = os.environ.get("FORCE_REFIT", "false").lower() == "true"
 REPROCESS_SESSIONS = {
     int(s) for s in os.environ.get("REPROCESS_SESSIONS", "").split(",") if s.strip()
@@ -201,14 +213,17 @@ def fetch_driver_rosters(session_keys):
 
 def build_name_strip_pattern(driver_rosters):
     """Compiles a case-insensitive, word-boundary regex matching any driver
-    first/last name or team name from `driver_rosters` (excluding short/
-    ambiguous tokens -- see MIN_NAME_STRIP_LEN, AMBIGUOUS_NAME_STOPWORDS).
-    Returns None if there's nothing to strip."""
+    first/last name or team name from `driver_rosters`, skipping tokens too
+    short to be worth the collision risk (see MIN_NAME_STRIP_LEN) unless
+    they carry a keep context (see AMBIGUOUS_NAME_KEEP_CONTEXTS, which
+    anonymize_names() applies). Returns None if there's nothing to strip."""
     tokens = set()
     for d in driver_rosters:
         candidates = [d.get("first_name"), d.get("last_name"), d.get("team_name")]
         for token in candidates:
-            if token and len(token) >= MIN_NAME_STRIP_LEN and token.lower() not in AMBIGUOUS_NAME_STOPWORDS:
+            if not token:
+                continue
+            if len(token) >= MIN_NAME_STRIP_LEN or token.lower() in AMBIGUOUS_NAME_KEEP_CONTEXTS:
                 tokens.add(token)
     if not tokens:
         return None
@@ -220,12 +235,25 @@ def build_name_strip_pattern(driver_rosters):
 
 def anonymize_names(text, name_strip_pattern):
     """Strips driver/team names out of `text` for topic-modeling purposes
-    only (transcript_text itself is never touched). Falls back to the
-    original text if stripping would leave nothing."""
+    only (transcript_text itself is never touched), leaving any occurrence
+    that falls inside an AMBIGUOUS_NAME_KEEP_CONTEXTS phrase in place. Falls
+    back to the original text if stripping would leave nothing."""
     if name_strip_pattern is None or not text:
         return text
-    stripped, n_subs = name_strip_pattern.subn("", text)
-    if n_subs == 0:
+    keep_spans = (
+        [m.span() for m in AMBIGUOUS_NAME_KEEP_PATTERN.finditer(text)]
+        if AMBIGUOUS_NAME_KEEP_PATTERN is not None
+        else []
+    )
+
+    def replace(match):
+        start, end = match.span()
+        if any(ks <= start and end <= ke for ks, ke in keep_spans):
+            return match.group(0)
+        return ""
+
+    stripped = name_strip_pattern.sub(replace, text)
+    if stripped == text:
         return text
     collapsed = re.sub(r"\s{2,}", " ", stripped).strip(" ,.")
     return collapsed or text
