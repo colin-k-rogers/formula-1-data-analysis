@@ -28,6 +28,13 @@ const N = (v: unknown): number => (v != null ? Number(v) : 0);
 const FCT_DRIVER_TOPIC_RACE = '"f1"."marts"."fct_driver_topic_race"';
 const FCT_RADIO_MESSAGES = '"f1"."marts"."fct_radio_messages"';
 
+// Matches fct_radio_messages.sql's coalesce(t.topic_label, 'Uncategorized') —
+// BERTopic's outlier bucket (topic_id = -1), not a real topic. It's still a
+// selectable option, just not one worth defaulting to (it can easily be the
+// single largest "topic" by volume, which would otherwise make it the
+// pre-selected topic every time this tab first loads).
+const UNCATEGORIZED_TOPIC = "Uncategorized";
+
 // Sized to TOP_N_SERIES + OTHER_BUCKET_SLACK so every series shown without an
 // "Other" bucket (see buildStackedSeries) still gets its own color instead of
 // the palette wrapping around and reusing one.
@@ -322,13 +329,17 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
  * unless there are only a handful more than TOP_N_SERIES (see
  * OTHER_BUCKET_SLACK), in which case it's fine to just show them all instead
  * of bucketing a small remainder behind an "Other" that's no simpler than
- * showing it directly.
+ * showing it directly. Pass `bucketOthers: false` to skip this entirely and
+ * always show every series — used for the team breakdown, where the field is
+ * small and fixed enough (~10-11 constructors) that "Other" would only ever
+ * hide detail, never actually simplify the chart.
  * `seriesKey` picks the pivot dimension out of each row — a topic label when
  * charting one entity's topic mix, or a team/driver name when charting one
  * topic's spread across the field. */
 function buildStackedSeries(
   rows: Record<string, unknown>[],
   seriesKey: (row: Record<string, unknown>) => string,
+  { bucketOthers = true }: { bucketOthers?: boolean } = {},
 ) {
   const totalsBySeries = new Map<string, number>();
   for (const r of rows) {
@@ -336,7 +347,7 @@ function buildStackedSeries(
     totalsBySeries.set(key, (totalsBySeries.get(key) ?? 0) + N(r.message_count));
   }
   const sortedSeries = [...totalsBySeries.entries()].sort((a, b) => b[1] - a[1]);
-  const showAllSeries = sortedSeries.length <= TOP_N_SERIES + OTHER_BUCKET_SLACK;
+  const showAllSeries = !bucketOthers || sortedSeries.length <= TOP_N_SERIES + OTHER_BUCKET_SLACK;
   const topSeries = (showAllSeries ? sortedSeries : sortedSeries.slice(0, TOP_N_SERIES)).map(
     ([key]) => key,
   );
@@ -379,10 +390,26 @@ function groupBySeasonYear(
     .map(([year, data]) => ({ year, data }));
 }
 
+// Resolves a series name (plus its index in the series array, for the
+// common case of just cycling through PALETTE) to a display color. Lets a
+// caller override individual series' colors — e.g. a real team livery color
+// instead of an arbitrary palette slot — while still falling back to the
+// palette for anything it doesn't have an opinion on.
+type ColorForSeries = (series: string, index: number) => string;
+
+const defaultColorForSeries: ColorForSeries = (s, i) =>
+  s === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length];
+
 /** Color-keyed legend shared across a season's stack of mini charts (or a
  * single chart), rendered once above the chart(s) rather than per-chart so
  * it doesn't repeat once "All" seasons splits into several charts. */
-function SeriesLegend({ series }: { series: string[] }) {
+function SeriesLegend({
+  series,
+  colorForSeries = defaultColorForSeries,
+}: {
+  series: string[];
+  colorForSeries?: ColorForSeries;
+}) {
   if (series.length <= 1) return null;
   return (
     <div className="flex flex-wrap gap-3 mb-3">
@@ -394,7 +421,7 @@ function SeriesLegend({ series }: { series: string[] }) {
               width: 10,
               height: 10,
               borderRadius: "50%",
-              background: s === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length],
+              background: colorForSeries(s, i),
             }}
           />
           {s}
@@ -408,10 +435,12 @@ function TopicLineChart({
   chartData,
   series,
   height = 340,
+  colorForSeries = defaultColorForSeries,
 }: {
   chartData: Record<string, unknown>[];
   series: string[];
   height?: number;
+  colorForSeries?: ColorForSeries;
 }) {
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -433,7 +462,7 @@ function TopicLineChart({
             key={s}
             type="monotone"
             dataKey={s}
-            stroke={s === "Other" ? OTHER_COLOR : PALETTE[i % PALETTE.length]}
+            stroke={colorForSeries(s, i)}
             strokeWidth={2}
             dot={{ r: 2 }}
             activeDot={{ r: 4 }}
@@ -452,16 +481,18 @@ function SeasonSeriesChart({
   season,
   chartData,
   series,
+  colorForSeries,
 }: {
   season: Season;
   chartData: Record<string, unknown>[];
   series: string[];
+  colorForSeries?: ColorForSeries;
 }) {
   if (season !== "all") {
     return (
       <>
-        <SeriesLegend series={series} />
-        <TopicLineChart chartData={chartData} series={series} />
+        <SeriesLegend series={series} colorForSeries={colorForSeries} />
+        <TopicLineChart chartData={chartData} series={series} colorForSeries={colorForSeries} />
       </>
     );
   }
@@ -469,14 +500,14 @@ function SeasonSeriesChart({
   const bySeason = groupBySeasonYear(chartData);
   return (
     <>
-      <SeriesLegend series={series} />
+      <SeriesLegend series={series} colorForSeries={colorForSeries} />
       <div className="space-y-6">
         {bySeason.map(({ year, data }) => (
           <div key={year}>
             <h3 className="text-xs font-semibold mb-1" style={{ color: "#231f20" }}>
               {year}
             </h3>
-            <TopicLineChart chartData={data} series={series} height={220} />
+            <TopicLineChart chartData={data} series={series} height={220} colorForSeries={colorForSeries} />
           </div>
         ))}
       </div>
@@ -502,11 +533,18 @@ function TopicOverSeason({ season }: { season: Season }) {
   // shouldn't be trusted just because it's non-null.
   const [topic, setTopic] = useDiveState<string | null>("topic", null);
   const knownTopics = new Set(topicOptions.map((row) => String(row.topic_label)));
+  // Prefers the highest-volume REAL topic over Uncategorized (BERTopic's
+  // outlier bucket) as the default, even though Uncategorized sorts first
+  // whenever it happens to be the single largest bucket — it's still
+  // selectable from the dropdown, just not a useful first impression of
+  // "what do people talk about".
+  const defaultTopicOption =
+    topicOptions.find((row) => String(row.topic_label) !== UNCATEGORIZED_TOPIC) ?? topicOptions[0];
   const effectiveTopic =
     topic != null && knownTopics.has(topic)
       ? topic
-      : topicOptions.length
-        ? String(topicOptions[0].topic_label)
+      : defaultTopicOption
+        ? String(defaultTopicOption.topic_label)
         : null;
 
   const [breakdown, setBreakdown] = useDiveState<"team" | "driver" | "total">(
@@ -523,6 +561,7 @@ function TopicOverSeason({ season }: { season: Season }) {
         session_name,
         session_date,
         ${breakdown === "total" ? "'Messages'" : breakdown === "team" ? "team_name" : "driver_acronym"} as entity,
+        ${breakdown === "team" ? "any_value(team_colour) as team_colour," : ""}
         sum(message_count) as message_count
       from ${FCT_DRIVER_TOPIC_RACE}
       ${whereClause(seasonFilter(season), `topic_label = '${effectiveTopic}'`)}
@@ -533,10 +572,29 @@ function TopicOverSeason({ season }: { season: Season }) {
   );
   const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
 
+  // The team breakdown skips "Other" entirely (the constructor field is
+  // small and fixed enough that bucketing only ever hides a team, never
+  // simplifies the chart) and colors each team by its own real livery color
+  // instead of an arbitrary palette slot — both PALETTE (8 colors) and
+  // OTHER_BUCKET_SLACK's cap (8 series) are too small for ~10-11
+  // constructors anyway.
   const { chartData, series } = useMemo(
-    () => buildStackedSeries(rows, (r) => String(r.entity)),
-    [rows],
+    () => buildStackedSeries(rows, (r) => String(r.entity), { bucketOthers: breakdown !== "team" }),
+    [rows, breakdown],
   );
+  const teamColorMap = useMemo(() => {
+    const map = new Map<string, string>();
+    if (breakdown !== "team") return map;
+    for (const r of rows) {
+      const key = String(r.entity);
+      if (!map.has(key) && r.team_colour != null) map.set(key, `#${String(r.team_colour)}`);
+    }
+    return map;
+  }, [rows, breakdown]);
+  const colorForSeries: ColorForSeries | undefined =
+    breakdown === "team"
+      ? (s, i) => teamColorMap.get(s) ?? defaultColorForSeries(s, i)
+      : undefined;
   const totalMessages = rows.reduce((sum, r) => sum + N(r.message_count), 0);
   const raceCount = new Set(rows.map((r) => N(r.session_key))).size;
 
@@ -597,7 +655,12 @@ function TopicOverSeason({ season }: { season: Season }) {
           <p className="text-sm mb-2" style={{ color: "#6a6a6a" }}>
             {totalMessages} messages across {raceCount} races
           </p>
-          <SeasonSeriesChart season={season} chartData={chartData} series={series} />
+          <SeasonSeriesChart
+            season={season}
+            chartData={chartData}
+            series={series}
+            colorForSeries={colorForSeries}
+          />
         </>
       )}
     </div>
