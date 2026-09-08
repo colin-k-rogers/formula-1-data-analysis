@@ -1,7 +1,7 @@
 // Kept byte-for-byte identical to .dive-preview/src/dive.tsx whenever this is
 // the dive you're actively previewing — mirror any change there too. (Only
 // one dive can be live in the preview app at a time; see README.md.)
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useSQLQuery, useDiveState } from "@motherduck/react-sql-query";
 import {
   Bar,
@@ -260,10 +260,28 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
   );
   const rows = Array.isArray(rowsQ.data) ? rowsQ.data : [];
 
+  // Every topic shown, never folded into "Other" — with dozens of topics
+  // possible across a season, the way to keep the chart readable is letting
+  // the viewer hide the ones they don't care about (see hiddenTopics below),
+  // not picking a handful for them upfront.
   const { chartData, series: topics } = useMemo(
-    () => buildStackedSeries(rows, (r) => String(r.topic_label)),
+    () => buildStackedSeries(rows, (r) => String(r.topic_label), { bucketOthers: false }),
     [rows],
   );
+
+  // Which topics the viewer has clicked off in the legend — plain component
+  // state, not useDiveState: it's a transient display preference for the
+  // chart currently on screen, not something worth round-tripping through
+  // the URL like the season/entity/breakdown selections are.
+  const [hiddenTopics, setHiddenTopics] = useState<Set<string>>(new Set());
+  const toggleTopic = (topicLabel: string) => {
+    setHiddenTopics((prev) => {
+      const next = new Set(prev);
+      if (next.has(topicLabel)) next.delete(topicLabel);
+      else next.add(topicLabel);
+      return next;
+    });
+  };
 
   return (
     <div>
@@ -317,7 +335,13 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
           No radio messages found{groupBy === "all" ? "" : ` for ${effectiveEntity}`}.
         </p>
       ) : (
-        <SeasonSeriesChart season={season} chartData={chartData} series={topics} />
+        <SeasonSeriesChart
+          season={season}
+          chartData={chartData}
+          series={topics}
+          hiddenSeries={hiddenTopics}
+          onToggleSeries={toggleTopic}
+        />
       )}
     </div>
   );
@@ -402,31 +426,51 @@ const defaultColorForSeries: ColorForSeries = (s, i) =>
 
 /** Color-keyed legend shared across a season's stack of mini charts (or a
  * single chart), rendered once above the chart(s) rather than per-chart so
- * it doesn't repeat once "All" seasons splits into several charts. */
+ * it doesn't repeat once "All" seasons splits into several charts. Clickable
+ * when the caller passes `onToggle` — lets a viewer hide individual series
+ * (struck through, dimmed) instead of the chart deciding upfront which ones
+ * are worth showing. */
 function SeriesLegend({
   series,
   colorForSeries = defaultColorForSeries,
+  hiddenSeries,
+  onToggle,
 }: {
   series: string[];
   colorForSeries?: ColorForSeries;
+  hiddenSeries?: Set<string>;
+  onToggle?: (series: string) => void;
 }) {
   if (series.length <= 1) return null;
   return (
     <div className="flex flex-wrap gap-3 mb-3">
-      {series.map((s, i) => (
-        <div key={s} className="flex items-center gap-1 text-xs" style={{ color: "#6a6a6a" }}>
-          <span
+      {series.map((s, i) => {
+        const isHidden = hiddenSeries?.has(s) ?? false;
+        return (
+          <div
+            key={s}
+            onClick={onToggle ? () => onToggle(s) : undefined}
+            className="flex items-center gap-1 text-xs"
             style={{
-              display: "inline-block",
-              width: 10,
-              height: 10,
-              borderRadius: "50%",
-              background: colorForSeries(s, i),
+              color: isHidden ? "#b0b0b0" : "#6a6a6a",
+              textDecoration: isHidden ? "line-through" : "none",
+              cursor: onToggle ? "pointer" : undefined,
+              userSelect: "none",
             }}
-          />
-          {s}
-        </div>
-      ))}
+          >
+            <span
+              style={{
+                display: "inline-block",
+                width: 10,
+                height: 10,
+                borderRadius: "50%",
+                background: isHidden ? "#ddd" : colorForSeries(s, i),
+              }}
+            />
+            {s}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -436,11 +480,13 @@ function TopicLineChart({
   series,
   height = 340,
   colorForSeries = defaultColorForSeries,
+  hiddenSeries,
 }: {
   chartData: Record<string, unknown>[];
   series: string[];
   height?: number;
   colorForSeries?: ColorForSeries;
+  hiddenSeries?: Set<string>;
 }) {
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -466,6 +512,7 @@ function TopicLineChart({
             strokeWidth={2}
             dot={{ r: 2 }}
             activeDot={{ r: 4 }}
+            hide={hiddenSeries?.has(s) ?? false}
           />
         ))}
       </LineChart>
@@ -476,23 +523,38 @@ function TopicLineChart({
 /** Shared season-aware chart: a single line chart for one season, or — when
  * "All" seasons is selected — one smaller line chart per season stacked
  * vertically, so the x-axis never has to fit every race from every season
- * at once. */
+ * at once. Pass `hiddenSeries`/`onToggleSeries` together to let the legend
+ * toggle individual series' visibility across every mini chart at once. */
 function SeasonSeriesChart({
   season,
   chartData,
   series,
   colorForSeries,
+  hiddenSeries,
+  onToggleSeries,
 }: {
   season: Season;
   chartData: Record<string, unknown>[];
   series: string[];
   colorForSeries?: ColorForSeries;
+  hiddenSeries?: Set<string>;
+  onToggleSeries?: (series: string) => void;
 }) {
   if (season !== "all") {
     return (
       <>
-        <SeriesLegend series={series} colorForSeries={colorForSeries} />
-        <TopicLineChart chartData={chartData} series={series} colorForSeries={colorForSeries} />
+        <SeriesLegend
+          series={series}
+          colorForSeries={colorForSeries}
+          hiddenSeries={hiddenSeries}
+          onToggle={onToggleSeries}
+        />
+        <TopicLineChart
+          chartData={chartData}
+          series={series}
+          colorForSeries={colorForSeries}
+          hiddenSeries={hiddenSeries}
+        />
       </>
     );
   }
@@ -500,14 +562,25 @@ function SeasonSeriesChart({
   const bySeason = groupBySeasonYear(chartData);
   return (
     <>
-      <SeriesLegend series={series} colorForSeries={colorForSeries} />
+      <SeriesLegend
+        series={series}
+        colorForSeries={colorForSeries}
+        hiddenSeries={hiddenSeries}
+        onToggle={onToggleSeries}
+      />
       <div className="space-y-6">
         {bySeason.map(({ year, data }) => (
           <div key={year}>
             <h3 className="text-xs font-semibold mb-1" style={{ color: "#231f20" }}>
               {year}
             </h3>
-            <TopicLineChart chartData={data} series={series} height={220} colorForSeries={colorForSeries} />
+            <TopicLineChart
+              chartData={data}
+              series={series}
+              height={220}
+              colorForSeries={colorForSeries}
+              hiddenSeries={hiddenSeries}
+            />
           </div>
         ))}
       </div>
