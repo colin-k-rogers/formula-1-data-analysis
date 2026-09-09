@@ -11,7 +11,7 @@ models:
   f1:
     staging:
       +materialized: view
-      +schema: staging
+      +schema: "staging{{ var('schema_suffix', '') }}"
     marts:
       +materialized: table
-      +schema: marts
+      +schema: "marts{{ var('schema_suffix', '') }}"

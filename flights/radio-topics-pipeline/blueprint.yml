@@ -28,6 +28,9 @@ resources:
         AWS_REGION: us-east-1
         BUCKET_NAME: f1-radio-topics-lakehouse
         EMR_APPLICATION_ID: "00g8dvj9kjj0o709"
+        # Appends the branch-scoped suffix to dbt's marts schema name (see
+        # dbt/dbt_project.yml) in preview; resolves to "" in prod.
+        SCHEMA_SUFFIX: ${var.preview_suffix}
       targets:
         preview:
           name: f1-radio-topics-pipeline:${target.branch} (Preview)

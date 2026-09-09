@@ -5,6 +5,7 @@ tarball of GITHUB_REF, default "main") instead of running against a snapshot
 embedded in this file, so the Flight always builds whatever is on GitHub.
 """
 import io
+import json
 import os
 import pathlib
 import subprocess
@@ -13,6 +14,9 @@ import urllib.request
 
 GITHUB_REPO = "colin-k-rogers/formula-1-data-analysis"
 GITHUB_REF = os.environ.get("GITHUB_REF", "main")
+# Appended to the staging/marts schema names (see dbt/dbt_project.yml) so a
+# preview run lands in its own branch-scoped schemas instead of prod's.
+SCHEMA_SUFFIX = os.environ.get("SCHEMA_SUFFIX", "")
 FETCH_TIMEOUT_SEC = 30
 
 PROJECT_DIR = pathlib.Path("/tmp/dbt_project")
@@ -47,7 +51,12 @@ def main():
     fetch_dbt_project()
 
     subprocess.run(
-        ["dbt", "build", "--project-dir", str(PROJECT_DIR), "--profiles-dir", str(PROJECT_DIR)],
+        [
+            "dbt", "build",
+            "--project-dir", str(PROJECT_DIR),
+            "--profiles-dir", str(PROJECT_DIR),
+            "--vars", json.dumps({"schema_suffix": SCHEMA_SUFFIX}),
+        ],
         check=True,
     )
 

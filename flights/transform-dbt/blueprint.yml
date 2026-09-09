@@ -18,6 +18,10 @@ resources:
       # Never auto-run on deploy: it writes to f1.marts.*. It already runs on
       # its own weekly schedule, 30 minutes after the ingest Flight.
       runOnDeploy: false
+      # Appends the branch-scoped suffix to dbt's staging/marts schema names
+      # (see dbt/dbt_project.yml) in preview; resolves to "" in prod.
+      config:
+        SCHEMA_SUFFIX: ${var.preview_suffix}
       targets:
         preview:
           name: f1-transform-dbt:${target.branch} (Preview)

@@ -3,7 +3,10 @@ version: 2
 sources:
   - name: openf1
     database: f1
-    schema: raw
+    # Suffixed the same way as dbt_project.yml's model schemas, so a preview
+    # build reads the branch-scoped raw data ingest-openf1 wrote for this PR
+    # instead of prod's.
+    schema: "raw{{ var('schema_suffix', '') }}"
     tables:
       - name: meetings
       - name: sessions
