@@ -1,0 +1,234 @@
+name: Deploy Spark Staging
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Only spark_jobs/radio_topic_modeling changes get a staging build — unlike
+# tests.yaml, this isn't a required check, so it's fine (and desired) for it
+# to not run at all on PRs that don't touch this job.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "spark_jobs/radio_topic_modeling/**"
+      - ".github/workflows/deploy_spark_staging.yaml"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to build and tag the staging image from. Defaults to the ref this is dispatched on.
+        required: false
+        type: string
+
+jobs:
+  deploy-staging:
+    name: Build and Deploy Staging Image
+    runs-on: ${{ vars.SPARK_ARCHITECTURE == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check AWS credentials
+        id: aws-creds
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          STAGING_APP_ID: ${{ vars.EMR_STAGING_APPLICATION_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$STAGING_APP_ID" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Spark staging deploy skipped: AWS_ACCESS_KEY_ID secret or EMR_STAGING_APPLICATION_ID variable isn't configured for this repository (see spark_jobs/radio_topic_modeling/README.md's \"PR staging\" section)."
+          fi
+
+      # Same tag every push to the same branch — a staging run always
+      # reflects the branch's latest pushed commit, mirroring how the
+      # Flights/Dives preview deploy always redeploys on every push rather
+      # than versioning per-commit. Delegates to ci_resolve_tag.sh so this
+      # can never compute a different tag than cleanup_spark_staging.yaml.
+      - name: Resolve image tag
+        id: image
+        if: success() && steps.aws-creds.outputs.available == 'true'
+        shell: bash
+        env:
+          BRANCH: ${{ inputs.branch || github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$(spark_jobs/radio_topic_modeling/ci_resolve_tag.sh "$BRANCH")"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ECR
+        if: success() && steps.aws-creds.outputs.available == 'true'
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          echo "account_id=${account_id}" >> "$GITHUB_ENV"
+          aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+            | docker login --username AWS --password-stdin "${account_id}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+      # Cheap (a single GetApplication call) and runs before the expensive
+      # build/push below, so a drifted SPARK_ARCHITECTURE repo variable
+      # fails loudly here instead of silently: every job run against a
+      # wrong-architecture image would otherwise fail at launch with
+      # EMR Serverless's "Custom image architecture doesn't match
+      # application architecture" — the same failure mode setup.sh's own
+      # EXISTING_ARCH check guards against for production, reused here for
+      # staging since update-application itself doesn't validate this.
+      - name: Verify staging application architecture
+        if: success() && steps.aws-creds.outputs.available == 'true'
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          STAGING_APP_ID: ${{ vars.EMR_STAGING_APPLICATION_ID }}
+          EXPECTED_ARCH: ${{ vars.SPARK_ARCHITECTURE == 'arm64' && 'ARM64' || 'X86_64' }}
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          actual_arch="$(aws emr-serverless get-application --application-id "$STAGING_APP_ID" --query application.architecture --output text)"
+          if [ "$actual_arch" != "$EXPECTED_ARCH" ]; then
+            echo "::error::Staging application ${STAGING_APP_ID} is ${actual_arch}, but this workflow would build a ${EXPECTED_ARCH} image (from the SPARK_ARCHITECTURE repo variable). Set SPARK_ARCHITECTURE to 'arm64' or 'x86_64' to match, or recreate the staging application via setup_staging.sh with matching ARCHITECTURE in .env." >&2
+            exit 1
+          fi
+          echo "Staging application architecture confirmed: ${actual_arch}"
+
+      # Pulling the shared cache tag as --cache-from (with BUILDKIT_INLINE_CACHE
+      # baked into it) skips rebuilding the ~2.35GB torch/faster-whisper/
+      # BERTopic layer on every push -- only worth redoing when
+      # requirements.txt or the Dockerfile itself actually changes (the
+      # Dockerfile copies job.py last specifically so an ordinary code
+      # change doesn't bust this cache).
+      - name: Pull layer cache
+        if: success() && steps.aws-creds.outputs.available == 'true'
+        shell: bash
+        env:
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          REPO_NAME: ${{ vars.ECR_REPO_NAME || 'f1-radio-topics' }}
+        run: |
+          docker pull "${account_id}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${REPO_NAME}:staging-cache" || true
+
+      # WHISPER_MODEL_SIZE/EMBEDDING_MODEL_NAME default to the Dockerfile's
+      # own ARG defaults, matching setup.sh's production build -- only set
+      # the matching repo variable if your .env customizes these away from
+      # the defaults, so a STAGING=true run requesting the same size finds
+      # it actually pre-baked.
+      - name: Build image
+        if: success() && steps.aws-creds.outputs.available == 'true'
+        shell: bash
+        env:
+          DOCKER_BUILDKIT: "1"
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          REPO_NAME: ${{ vars.ECR_REPO_NAME || 'f1-radio-topics' }}
+          TAG: ${{ steps.image.outputs.tag }}
+          WHISPER_MODEL_SIZE: ${{ vars.WHISPER_MODEL_SIZE || 'medium' }}
+          EMBEDDING_MODEL_NAME: ${{ vars.EMBEDDING_MODEL_NAME || 'all-MiniLM-L6-v2' }}
+        run: |
+          set -euo pipefail
+          image_base="${account_id}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${REPO_NAME}"
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --build-arg WHISPER_MODEL_SIZE="${WHISPER_MODEL_SIZE}" \
+            --build-arg EMBEDDING_MODEL_NAME="${EMBEDDING_MODEL_NAME}" \
+            --cache-from "${image_base}:staging-cache" \
+            -t "${image_base}:${TAG}" \
+            -t "${image_base}:staging-cache" \
+            spark_jobs/radio_topic_modeling
+
+      - name: Push image
+        if: success() && steps.aws-creds.outputs.available == 'true'
+        shell: bash
+        env:
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          REPO_NAME: ${{ vars.ECR_REPO_NAME || 'f1-radio-topics' }}
+          TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image_base="${account_id}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${REPO_NAME}"
+          docker push "${image_base}:${TAG}"
+          docker push "${image_base}:staging-cache"
+
+      # Only imageConfiguration is passed (not networkConfiguration), so
+      # this update can't touch the staging application's VPC/subnet/
+      # security group even by accident -- those stay whatever
+      # spark_jobs/radio_topic_modeling/setup_staging.sh set them to.
+      - name: Point staging application at this image
+        if: success() && steps.aws-creds.outputs.available == 'true'
+        shell: bash
+        env:
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          REPO_NAME: ${{ vars.ECR_REPO_NAME || 'f1-radio-topics' }}
+          TAG: ${{ steps.image.outputs.tag }}
+          STAGING_APP_ID: ${{ vars.EMR_STAGING_APPLICATION_ID }}
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          image_base="${account_id}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${REPO_NAME}"
+          aws emr-serverless update-application \
+            --application-id "$STAGING_APP_ID" \
+            --image-configuration "{\"imageUri\": \"${image_base}:${TAG}\"}" \
+            >/dev/null
+          echo "Updated staging application ${STAGING_APP_ID} to ${image_base}:${TAG}"
+
+      # job.status reflects whether any earlier step in this job actually
+      # failed, distinct from "available" (which only means credentials
+      # were configured) -- so a build/push failure gets reported as a
+      # failure here, not silently as the same success message a clean run
+      # gets. Points at README.md rather than repeating the testing steps,
+      # so the two can't drift apart (see AGENTS.md).
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          AVAILABLE: ${{ steps.aws-creds.outputs.available }}
+          JOB_STATUS: ${{ job.status }}
+          TAG: ${{ steps.image.outputs.tag }}
+          STAGING_APP_ID: ${{ vars.EMR_STAGING_APPLICATION_ID }}
+        with:
+          script: |
+            const marker = '<!-- spark-staging-comment -->';
+            const available = process.env.AVAILABLE === 'true';
+            const succeeded = process.env.JOB_STATUS === 'success';
+
+            let body;
+            if (!available) {
+              body = `${marker}\n### Spark Staging\n\nSkipped — AWS_ACCESS_KEY_ID secret or EMR_STAGING_APPLICATION_ID variable isn't configured for this repository. See spark_jobs/radio_topic_modeling/README.md's "PR staging" section.`;
+            } else if (!succeeded) {
+              body = `${marker}\n### Spark Staging\n\n⚠️ The staging build/push/update failed partway through — see this workflow run's logs. The shared staging application may still be pointed at a previous branch's image, not this one.`;
+            } else {
+              body = `${marker}\n### Spark Staging\n\nPushed \`${process.env.TAG}\` and pointed the shared staging EMR Serverless application (\`${process.env.STAGING_APP_ID}\`) at it. See spark_jobs/radio_topic_modeling/README.md's "PR staging" section for how to end-to-end test this branch's Spark output through dbt/Dives preview.`;
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
