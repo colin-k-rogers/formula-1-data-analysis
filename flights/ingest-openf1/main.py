@@ -1,5 +1,6 @@
 """MotherDuck Flight: ingest OpenF1 session/meeting/driver/lap data for a
-season into f1.raw.*
+season into f1.raw.* (a branch-scoped raw_<suffix> schema in preview, so a
+preview run never writes into prod's raw data).
 
 Idempotent: re-running (whether on schedule or on demand) deletes and
 re-inserts rows for every session refreshed this run, so corrections
@@ -19,6 +20,8 @@ import duckdb
 import requests
 
 BASE_URL = "https://api.openf1.org/v1"
+# Branch-scoped in preview (see motherduck.yml's preview_suffix), "" in prod.
+RAW_SCHEMA = f"raw{os.environ.get('SCHEMA_SUFFIX', '')}"
 REQUEST_TIMEOUT_SEC = 30
 MAX_RETRIES = 3
 MAX_RATE_LIMIT_RETRIES = 6
@@ -70,13 +73,14 @@ def fetch(endpoint, params):
 
 
 def load_table(con, tmp_path, records, table, key_columns, key_values):
-    """Bulk-load `records` (a list of dicts) into f1.raw.<table>, replacing any
-    existing rows matching key_values on key_columns (delete+insert upsert)."""
+    """Bulk-load `records` (a list of dicts) into f1.<RAW_SCHEMA>.<table>,
+    replacing any existing rows matching key_values on key_columns
+    (delete+insert upsert)."""
     if key_values:
         table_exists = con.execute(
             "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_catalog = 'f1' AND table_schema = 'raw' AND table_name = ?",
-            [table],
+            "WHERE table_catalog = 'f1' AND table_schema = ? AND table_name = ?",
+            [RAW_SCHEMA, table],
         ).fetchone()[0] > 0
         # Delete stale rows for these keys even if this run fetched zero
         # records for them, so a session that now returns nothing doesn't
@@ -85,7 +89,7 @@ def load_table(con, tmp_path, records, table, key_columns, key_values):
             placeholders = ", ".join("?" for _ in key_values)
             key_expr = key_columns[0] if len(key_columns) == 1 else f"({', '.join(key_columns)})"
             con.execute(
-                f"DELETE FROM f1.raw.{table} WHERE {key_expr} IN ({placeholders})",
+                f'DELETE FROM f1."{RAW_SCHEMA}".{table} WHERE {key_expr} IN ({placeholders})',
                 key_values,
             )
 
@@ -96,7 +100,7 @@ def load_table(con, tmp_path, records, table, key_columns, key_values):
         json.dump(records, f)
 
     con.execute(
-        f"CREATE TABLE IF NOT EXISTS f1.raw.{table} AS "
+        f'CREATE TABLE IF NOT EXISTS f1."{RAW_SCHEMA}".{table} AS '
         f"SELECT * FROM read_json_auto('{tmp_path}') WHERE false"
     )
 
@@ -106,29 +110,31 @@ def load_table(con, tmp_path, records, table, key_columns, key_values):
     # values for that column (e.g. country_code) doesn't fail to cast.
     json_columns = con.execute(
         "SELECT column_name FROM information_schema.columns "
-        "WHERE table_catalog = 'f1' AND table_schema = 'raw' AND table_name = ? "
+        "WHERE table_catalog = 'f1' AND table_schema = ? AND table_name = ? "
         "AND data_type = 'JSON'",
-        [table],
+        [RAW_SCHEMA, table],
     ).fetchall()
     for (column_name,) in json_columns:
-        con.execute(f"ALTER TABLE f1.raw.{table} ALTER COLUMN {column_name} TYPE VARCHAR")
+        con.execute(f'ALTER TABLE f1."{RAW_SCHEMA}".{table} ALTER COLUMN {column_name} TYPE VARCHAR')
 
-    con.execute(f"INSERT INTO f1.raw.{table} SELECT * FROM read_json_auto('{tmp_path}')")
+    con.execute(f'INSERT INTO f1."{RAW_SCHEMA}".{table} SELECT * FROM read_json_auto(\'{tmp_path}\')')
     return len(records)
 
 
 def sessions_with_rows(con, table):
-    """session_keys that already have at least one row in f1.raw.<table>."""
+    """session_keys that already have at least one row in f1.<RAW_SCHEMA>.<table>."""
     table_exists = con.execute(
         "SELECT count(*) FROM information_schema.tables "
-        "WHERE table_catalog = 'f1' AND table_schema = 'raw' AND table_name = ?",
-        [table],
+        "WHERE table_catalog = 'f1' AND table_schema = ? AND table_name = ?",
+        [RAW_SCHEMA, table],
     ).fetchone()[0] > 0
     if not table_exists:
         return set()
     return {
         row[0]
-        for row in con.execute(f"SELECT DISTINCT session_key FROM f1.raw.{table}").fetchall()
+        for row in con.execute(
+            f'SELECT DISTINCT session_key FROM f1."{RAW_SCHEMA}".{table}'
+        ).fetchall()
     }
 
 
@@ -147,7 +153,7 @@ def needs_refresh(session, already_have, now):
 
 def refresh_keys_for(con, table, candidate_sessions, now):
     """session_keys among `candidate_sessions` worth (re-)fetching fresh
-    f1.raw.<table> data for."""
+    f1.<RAW_SCHEMA>.<table> data for."""
     already_have = sessions_with_rows(con, table)
     return [s["session_key"] for s in candidate_sessions if needs_refresh(s, already_have, now)]
 
@@ -179,6 +185,11 @@ def main():
     meetings = [m for m in all_meetings if m["meeting_key"] in set(meeting_keys)]
 
     con = duckdb.connect("md:")
+    # Preview's RAW_SCHEMA (e.g. raw_preview_<branch>) won't exist yet the
+    # first time a branch runs this Flight -- CREATE TABLE doesn't implicitly
+    # create a missing schema. Prod's "raw" already exists, so this is a no-op
+    # there.
+    con.execute(f'CREATE SCHEMA IF NOT EXISTS f1."{RAW_SCHEMA}"')
     now = datetime.now(timezone.utc)
 
     # Drivers and laps both matter for every target session type now -- a

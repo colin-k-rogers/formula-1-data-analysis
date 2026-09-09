@@ -20,6 +20,9 @@ resources:
       runOnDeploy: false
       config:
         SEASON_YEAR: ${var.season_year}
+        # Appends the branch-scoped suffix to the raw schema (see main.py's
+        # RAW_SCHEMA) in preview; resolves to "" in prod.
+        SCHEMA_SUFFIX: ${var.preview_suffix}
       targets:
         preview:
           name: f1-ingest-openf1:${target.branch} (Preview)

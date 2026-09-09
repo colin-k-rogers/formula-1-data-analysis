@@ -9,6 +9,7 @@ the config keys, the `aws_emr` secret, and why each stage is scoped the way
 it is. The spark-submit parameters below mirror run.sh's.
 """
 import io
+import json
 import os
 import pathlib
 import subprocess
@@ -33,7 +34,6 @@ ENTRY_POINT = "local:///opt/radio_topic_modeling/job.py"
 JOB_RUN_TERMINAL_STATES = {"SUCCESS", "FAILED", "CANCELLED"}
 
 MD_DATABASE = "f1"
-DIVE_MART = f'"{MD_DATABASE}"."marts"."fct_driver_topic_race"'
 
 
 def log(message):
@@ -43,6 +43,13 @@ def log(message):
 def config(name, default=None):
     value = os.environ.get(name, "").strip()
     return value or default
+
+
+def dive_mart():
+    """fct_driver_topic_race's relation, in whatever marts schema this run's
+    SCHEMA_SUFFIX resolves to (branch-scoped in preview, unsuffixed in prod)."""
+    schema = f"marts{config('SCHEMA_SUFFIX', '')}"
+    return f'"{MD_DATABASE}"."{schema}"."fct_driver_topic_race"'
 
 
 def submit_job_run(emr, application_id, role_arn):
@@ -211,6 +218,8 @@ def run_dbt():
             str(PROJECT_DIR),
             "--profiles-dir",
             str(PROJECT_DIR),
+            "--vars",
+            json.dumps({"schema_suffix": config("SCHEMA_SUFFIX", "")}),
             "--select",
             *selector.split(),
         ],
@@ -227,16 +236,16 @@ def report_dive_data():
     # session_date in SQL below, since this step only prints these values.
     con.execute("SET TimeZone = 'UTC'")
     total_sessions, total_messages = con.execute(
-        f"SELECT count(DISTINCT session_key), sum(message_count) FROM {DIVE_MART}"
+        f"SELECT count(DISTINCT session_key), sum(message_count) FROM {dive_mart()}"
     ).fetchone()
     if not total_sessions:
         raise RuntimeError(
-            f"{DIVE_MART} is empty after a successful dbt build -- the Dive "
+            f"{dive_mart()} is empty after a successful dbt build -- the Dive "
             "would render nothing. Check the Spark job's Iceberg output and "
             "the radio_lakehouse attachment."
         )
 
-    log(f"  {DIVE_MART}: {total_sessions} sessions, {total_messages} messages")
+    log(f"  {dive_mart()}: {total_sessions} sessions, {total_messages} messages")
     log("  most recent sessions the Dive can now chart:")
     recent = con.execute(
         f"""
@@ -245,7 +254,7 @@ def report_dive_data():
             country_name,
             session_name,
             sum(message_count)
-        FROM {DIVE_MART}
+        FROM {dive_mart()}
         GROUP BY ALL
         ORDER BY session_day DESC
         LIMIT 5
