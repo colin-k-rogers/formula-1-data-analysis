@@ -82,6 +82,83 @@ FORCE_REFIT=true ./run.sh
 `run.sh` prints the job run id and the exact `aws emr-serverless
 get-job-run` command to check on it; logs land under `s3://${BUCKET_NAME}/logs/`.
 
+## PR staging
+
+Unlike the Flights/Dives in [flights/](../../flights) and
+[dives/](../../dives), a real end-to-end test of a change here means
+actually running Spark against a full container image, which is too heavy
+to redeploy per-PR the way [.github/workflows/deploy_blueprints.yaml](../../.github/workflows/deploy_blueprints.yaml)
+does. Instead, [.github/workflows/deploy_spark_staging.yaml](../../.github/workflows/deploy_spark_staging.yaml)
+builds and pushes a branch-tagged image (`pr-<branch>`) on every PR that
+touches this directory, and points **one shared staging EMR Serverless
+application** at whichever branch pushed most recently — reusing the same
+VPC/subnet/security group/IAM role `./setup.sh` already created for
+production, never a second copy of them. Only one branch's image (and, see
+below, one branch's data) can be staged at a time; that's the deliberate
+tradeoff for not needing per-branch AWS resources, and fine for how this
+repo is actually worked (one branch at a time). The workflow comments the
+pushed tag and staging application id on the PR.
+
+One-time setup (once `./setup.sh` has run):
+
+```bash
+./setup_staging.sh                              # creates the shared staging application
+../../warehouse/setup_spark_ci_iam_user.sh       # creates the CI IAM user + prints its key
+```
+
+The second script prints `gh secret set`/`gh variable set` commands for
+what GitHub Actions needs: secrets `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`, and variables `AWS_REGION`, `ECR_REPO_NAME`,
+`EMR_STAGING_APPLICATION_ID`. Without these, the workflow comments that it
+skipped instead of failing the PR.
+
+Two more variables matter only if your `.env` customizes the matching
+knob away from its default — the workflow validates/builds against these,
+so a mismatch fails loudly (an architecture check) or fails a staging job
+run at model-load time (the model-size args), rather than silently:
+
+- `SPARK_ARCHITECTURE=arm64` if that's what `ARCHITECTURE` is set to in
+  `.env` (default assumes `x86_64`) — picks a native `arm64` GitHub-hosted
+  runner for the image build instead of emulating one, since the base
+  image is too large to cross-build practically. The workflow also checks
+  this against the staging application's actual architecture before
+  building anything, and fails loudly on a mismatch instead of shipping an
+  image every job run would then reject.
+- `WHISPER_MODEL_SIZE` / `EMBEDDING_MODEL_NAME` if your `.env` sets these
+  away from the Dockerfile's defaults (`medium` / `all-MiniLM-L6-v2`) —
+  otherwise a `STAGING=true ./run.sh` requesting your customized size
+  finds the staging image was built with the default weights instead.
+
+**End-to-end testing a PR against staging data:** a staging job run writes
+to the `stg_raw` Iceberg namespace (a separate Glue database, auto-created
+by `job.py`'s `CREATE NAMESPACE IF NOT EXISTS`) and a separate
+`MODEL_STORE_PATH`, so it can never collide with production's `raw`
+tables or persisted BERTopic model — and the already-attached
+`radio_lakehouse` MotherDuck database can query it immediately as
+`radio_lakehouse.stg_raw.*`, no new `CREATE DATABASE` needed. To see a PR's
+Spark output flow all the way through dbt and a Dive:
+
+1. `STAGING=true ./run.sh` — submits against the staging application
+   (whatever image CI most recently pushed there) and writes `stg_raw`
+   instead of `raw`.
+2. Manually run the **Deploy Blueprints** GitHub Actions workflow
+   (`workflow_dispatch`, `target: preview`, `branch: <this PR's branch>`,
+   `blueprints: transform-dbt`) — its preview target sets `RADIO_SCHEMA:
+   stg_raw` (see [flights/transform-dbt/blueprint.yml](../../flights/transform-dbt/blueprint.yml)),
+   which [dbt/models/sources.yml](../../dbt/models/sources.yml) reads via
+   `env_var('RADIO_SCHEMA', 'raw')` — production dbt runs are unaffected
+   since that env var is only ever set for the preview target.
+3. Trigger that preview `f1-transform-dbt` Flight run in MotherDuck, then
+   optionally also preview-deploy `team-radio-topics` (same workflow,
+   `blueprints: team-radio-topics`) to view the result in a Dive.
+
+Closing or deleting a branch's PR runs
+[.github/workflows/cleanup_spark_staging.yaml](../../.github/workflows/cleanup_spark_staging.yaml),
+which deletes that branch's `pr-<branch>` image tag from ECR (best-effort —
+a PR that never pushed one is a no-op). It doesn't touch the staging
+application or `stg_raw` — those just get overwritten by whichever PR
+stages next.
+
 ## Config knobs
 
 `job.py` only imports once per process, so each variable must be set as an

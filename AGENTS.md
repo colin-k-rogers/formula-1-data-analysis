@@ -23,6 +23,13 @@
   pending change even if nothing has touched its files in git recently. It's
   a spot-check surfaced for a human to read, not an automatic pass/fail gate,
   so still don't rely on it instead of following the rule above.
+- The radio source's schema in `dbt/models/sources.yml`
+  (`env_var('RADIO_SCHEMA', 'raw')`) and `flights/transform-dbt/blueprint.yml`'s
+  preview target (`RADIO_SCHEMA: stg_raw`) must agree with whatever
+  namespace name `spark_jobs/radio_topic_modeling/run.sh`'s `STAGING=true`
+  path writes to (also `stg_raw`) — see that package's README "PR staging"
+  section. Changing one without the other silently breaks the end-to-end
+  staging test loop rather than raising an error.
 - A Dive's `export const REQUIRED_DATABASES = …` must stay on a single line:
   the deployer strips that declaration with a single-line regex, so a wrapped
   one deploys a Dive whose leftover array body is a syntax error. `make test`

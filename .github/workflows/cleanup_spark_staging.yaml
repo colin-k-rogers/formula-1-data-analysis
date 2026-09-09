@@ -1,0 +1,83 @@
+name: Cleanup Spark Staging
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types:
+      - closed
+  delete:
+
+concurrency:
+  group: cleanup-spark-staging-${{ github.event.pull_request.head.ref || github.event.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete Staging Image Tag for Branch
+    if: (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'delete' && github.event.ref_type == 'branch')
+    runs-on: ubuntu-latest
+    steps:
+      # Checked out so ci_resolve_tag.sh below computes the exact same tag
+      # deploy_spark_staging.yaml computed for this branch (that workflow
+      # runs from the PR branch's own checkout, so this uses the same
+      # ref — not main's copy of the script — for the same reason
+      # cleanup_preview_blueprints.yaml does).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Resolve cleanup branch
+        id: cleanup-branch
+        shell: bash
+        env:
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          DELETED_BRANCH: ${{ github.event.ref }}
+        run: |
+          set -euo pipefail
+          branch_name="${PR_BRANCH:-$DELETED_BRANCH}"
+          if [ -z "$branch_name" ]; then
+            echo "No branch name available for cleanup"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            tag="$(spark_jobs/radio_topic_modeling/ci_resolve_tag.sh "$branch_name")"
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check AWS credentials
+        id: aws-creds
+        if: success() && steps.cleanup-branch.outputs.available == 'true'
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Staging image cleanup skipped because AWS_ACCESS_KEY_ID is not configured for this repository."
+          fi
+
+      # Best-effort: the image tag for this branch may never have been
+      # pushed (e.g. the PR never touched spark_jobs/radio_topic_modeling),
+      # so a missing image is expected, not a failure.
+      - name: Delete staging image tag
+        if: success() && steps.cleanup-branch.outputs.available == 'true' && steps.aws-creds.outputs.available == 'true'
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          REPO_NAME: ${{ vars.ECR_REPO_NAME || 'f1-radio-topics' }}
+          TAG: ${{ steps.cleanup-branch.outputs.tag }}
+        run: |
+          set -euo pipefail
+          export AWS_PAGER=""
+          aws ecr batch-delete-image \
+            --repository-name "$REPO_NAME" \
+            --image-ids imageTag="$TAG" \
+            >/dev/null 2>&1 || true
+          echo "Deleted staging image tag (if it existed): ${REPO_NAME}:${TAG}"

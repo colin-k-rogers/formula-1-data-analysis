@@ -26,3 +26,9 @@ resources:
           # project instead of silently building main's.
           config:
             GITHUB_REF: ${target.branch}
+            # Reads the `stg_raw` Glue namespace instead of production's
+            # `raw` (see dbt/models/sources.yml), so a preview run of this
+            # Flight builds marts from whatever a staging EMR Serverless
+            # job run wrote for spark_jobs/radio_topic_modeling — see that
+            # package's README "PR staging" section for the end-to-end flow.
+            RADIO_SCHEMA: stg_raw

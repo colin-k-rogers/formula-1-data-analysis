@@ -16,8 +16,13 @@ USER root
 # gcc but not the Python dev headers by default.
 RUN dnf install -y python3-devel gcc-c++ make && dnf clean all
 
+# job.py is deliberately NOT copied here: it's this job's most frequently
+# edited file, and copying it before the RUN below would invalidate Docker's
+# cache for that ~2.35GB layer (pip install + model downloads) on every
+# code-only change, even though that layer's actual inputs are just
+# requirements.txt and the ARGs below. It's copied last instead, once that
+# layer is already cached and inputs it doesn't affect.
 COPY requirements.txt /opt/radio_topic_modeling/requirements.txt
-COPY job.py /opt/radio_topic_modeling/job.py
 
 # Pre-download model weights at build time so the job doesn't re-fetch them
 # at runtime — executors never need outbound internet this way; only the
@@ -38,6 +43,13 @@ RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL_SIZE}', device='cpu', compute_type='int8')" \
     && /opt/venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${EMBEDDING_MODEL_NAME}')" \
     && chown -R hadoop:hadoop /opt/radio_topic_modeling /opt/venv
+
+# Copied last (see the comment above requirements.txt) — --chown sets
+# ownership as part of the copy itself, so this doesn't force the
+# copy-up-the-whole-directory cost the chown-in-one-RUN comment above
+# warns about; that only applies to chowning a directory's *existing*
+# contents in a later, separate layer.
+COPY --chown=hadoop:hadoop job.py /opt/radio_topic_modeling/job.py
 
 # Deliberately not setting PYSPARK_PYTHON via ENV here: EMR Serverless's
 # driver launcher doesn't reliably pick up a plain container ENV for it, so
