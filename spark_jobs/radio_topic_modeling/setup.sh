@@ -41,6 +41,22 @@ case "$ARCHITECTURE" in
         ;;
 esac
 
+# ACCOUNT_ID only ever reaches AWS inside an ARN or the ECR registry host —
+# nothing below passes it to an API that would reject a wrong one. So an
+# ACCOUNT_ID that isn't the credentials' own account fails confusingly and
+# late instead: the ARN-keyed lookup in step 3 misses, the create by *name*
+# that follows then collides with the policy already in the real account
+# ("EntityAlreadyExists"), and step 4 pushes to a registry that isn't yours.
+# .env ships with a placeholder, so check it before touching anything. No
+# guard on the call itself: set -e stops here anyway, on the CLI's own
+# message, if credentials are missing or expired.
+CALLER_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+if [ "$CALLER_ACCOUNT" != "$ACCOUNT_ID" ]; then
+    echo "ACCOUNT_ID in .env is ${ACCOUNT_ID}, but these credentials belong to ${CALLER_ACCOUNT}." >&2
+    echo "Edit ACCOUNT_ID in .env, or point AWS_PROFILE at the account you meant." >&2
+    exit 1
+fi
+
 # 1. S3 bucket — holds the Iceberg warehouse data, EMR Serverless logs, and
 #    the persisted BERTopic model (see run.sh's MODEL_STORE_PATH) — all
 #    under one bucket so the IAM policy in step 3 already covers all of it.
