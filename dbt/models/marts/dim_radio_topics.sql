@@ -23,6 +23,7 @@ matched as (
     from topics t
     left join overrides o
         on t.top_keywords ilike '%' || o.topic_keyword || '%'
+    qualify rn = 1
 )
 
 select
@@ -32,4 +33,3 @@ select
     top_keywords,
     doc_count
 from matched
-where rn = 1
