@@ -30,6 +30,20 @@
   path writes to (also `stg_raw`) — see that package's README "PR staging"
   section. Changing one without the other silently breaks the end-to-end
   staging test loop rather than raising an error.
+- `dbt/models/marts/fct_driver_jev_topic_race.sql` deliberately names its topic
+  column `topic_label`, matching `fct_driver_topic_race` rather than the
+  `jev_topic_label` it reads upstream. `dives/team-radio-topics`' classifier
+  toggle relies on the two marts being column-compatible so it can swap one
+  table name; renaming that column to "match upstream" breaks every Jev chart
+  in the Dive, and nothing in dbt will complain.
+- `dbt/macros/jev_radio_taxonomy.sql` is the only place a Jev label, its
+  description, or its display name is written down. Editing a *description*
+  changes what the classifier is told, but `int_radio__jev_topics` is
+  incremental, so already-classified rows keep their old labels until it's
+  rebuilt with `--full-refresh` — an edit alone leaves the table a silent
+  mixture of two taxonomies. `dbt/tests/assert_jev_labels_in_taxonomy.sql`
+  only catches this when a label is renamed or removed, not when a
+  description is reworded.
 - A Dive's `export const REQUIRED_DATABASES = …` must stay on a single line:
   the deployer strips that declaration with a single-line regex, so a wrapped
   one deploys a Dive whose leftover array body is a syntax error. `make test`

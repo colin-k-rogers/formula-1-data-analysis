@@ -25,14 +25,42 @@ export const REQUIRED_DATABASES = [{ type: "database", path: "md:f1", alias: "f1
 
 const N = (v: unknown): number => (v != null ? Number(v) : 0);
 
-const FCT_DRIVER_TOPIC_RACE = '"f1"."marts"."fct_driver_topic_race"';
 const FCT_RADIO_MESSAGES = '"f1"."marts"."fct_radio_messages"';
+
+// The same radio, classified two ways. BERTopic discovers its own clusters
+// from the transcripts (see spark_jobs/radio_topic_modeling); Jev picks from
+// a fixed list of named topics in MotherDuck (see
+// dbt/macros/jev_radio_taxonomy.sql). Neither is the "right" one — BERTopic
+// finds topics nobody thought to ask for but leaves ~30% of messages in an
+// outlier bucket, Jev labels everything but only ever with a label someone
+// already wrote down — so this is a view toggle, not a migration.
+//
+// The two marts are column-compatible by construction (fct_driver_jev_topic_race
+// names its topic column `topic_label` for exactly this reason), so switching
+// classifier swaps a table name and every query and chart below is unchanged.
+type Classifier = "bertopic" | "jev";
+
+const CLASSIFIERS = {
+  bertopic: {
+    name: "BERTopic",
+    topicRaceMart: '"f1"."marts"."fct_driver_topic_race"',
+    // Column on FCT_RADIO_MESSAGES, which carries both classifications.
+    messageTopicColumn: "topic_label",
+  },
+  jev: {
+    name: "Jev",
+    topicRaceMart: '"f1"."marts"."fct_driver_jev_topic_race"',
+    messageTopicColumn: "jev_topic_label",
+  },
+} as const;
 
 // Matches fct_radio_messages.sql's coalesce(t.topic_label, 'Uncategorized') —
 // BERTopic's outlier bucket (topic_id = -1), not a real topic. It's still a
 // selectable option, just not one worth defaulting to (it can easily be the
 // single largest "topic" by volume, which would otherwise make it the
-// pre-selected topic every time this tab first loads).
+// pre-selected topic every time this tab first loads). No Jev label matches
+// it, so the guard below is simply inert under that classifier — Jev has no
+// outlier bucket to skip past.
 const UNCATEGORIZED_TOPIC = "Uncategorized";
 
 // Sized to TOP_N_SERIES + OTHER_BUCKET_SLACK so every series shown without an
@@ -98,8 +126,22 @@ export default function RadioTopicsDive() {
     "season",
   );
 
+  // Same don't-trust-the-URL rule as `season`/`entity` below, and with more
+  // reason: this one picks a table name to query. hasOwnProperty, not `in`:
+  // `in` also matches Object.prototype keys, so a link saying
+  // classifier=constructor would pass the check and then read an undefined
+  // table name straight into SQL.
+  const [classifier, setClassifier] = useDiveState<Classifier>("classifier", "bertopic");
+  const effectiveClassifier: Classifier = Object.prototype.hasOwnProperty.call(
+    CLASSIFIERS,
+    classifier,
+  )
+    ? classifier
+    : "bertopic";
+  const { topicRaceMart } = CLASSIFIERS[effectiveClassifier];
+
   const seasonsQ = useSQLQuery(`
-    select distinct year from ${FCT_DRIVER_TOPIC_RACE} order by year desc
+    select distinct year from ${topicRaceMart} order by year desc
   `);
   const seasons = (Array.isArray(seasonsQ.data) ? seasonsQ.data : []).map((r) => N(r.year));
 
@@ -119,8 +161,27 @@ export default function RadioTopicsDive() {
       </h1>
       <p className="text-sm mb-6" style={{ color: "#6a6a6a" }}>
         What drivers and teams talk about on team radio, transcribed with Whisper and
-        topic-modeled with BERTopic, tracked across the season.
+        classified two ways — BERTopic's discovered clusters, or Jev's fixed topic
+        list — tracked across the season.
       </p>
+
+      <div className="flex gap-2 mb-4 items-center">
+        <span className="text-xs" style={{ color: "#6a6a6a" }}>Topics from</span>
+        {(Object.keys(CLASSIFIERS) as Classifier[]).map((c) => (
+          <button
+            key={c}
+            onClick={() => setClassifier(c)}
+            className="text-xs px-2 py-1 rounded"
+            style={{
+              background: c === effectiveClassifier ? "#231f20" : "transparent",
+              color: c === effectiveClassifier ? "#fff" : "#6a6a6a",
+              border: `1px solid ${c === effectiveClassifier ? "#231f20" : "#ddd"}`,
+            }}
+          >
+            {CLASSIFIERS[c].name}
+          </button>
+        ))}
+      </div>
 
       <div className="flex gap-2 mb-4">
         <button
@@ -194,26 +255,27 @@ export default function RadioTopicsDive() {
       </div>
 
       {view === "race" ? (
-        <RaceTopicsDetail season={effectiveSeason} />
+        <RaceTopicsDetail season={effectiveSeason} classifier={effectiveClassifier} />
       ) : view === "topic" ? (
-        <TopicOverSeason season={effectiveSeason} />
+        <TopicOverSeason season={effectiveSeason} classifier={effectiveClassifier} />
       ) : view === "distribution" ? (
-        <TopicDistribution season={effectiveSeason} />
+        <TopicDistribution season={effectiveSeason} classifier={effectiveClassifier} />
       ) : (
-        <SeasonTopicsEvolution season={effectiveSeason} />
+        <SeasonTopicsEvolution season={effectiveSeason} classifier={effectiveClassifier} />
       )}
     </div>
   );
 }
 
-function SeasonTopicsEvolution({ season }: { season: Season }) {
+function SeasonTopicsEvolution({ season, classifier }: { season: Season; classifier: Classifier }) {
   const [groupBy, setGroupBy] = useDiveState<"driver" | "team" | "all">("groupBy", "driver");
+  const { topicRaceMart } = CLASSIFIERS[classifier];
 
   const entitiesQ = useSQLQuery(
     `
       select distinct
         ${groupBy === "driver" ? "driver_acronym as entity" : "team_name as entity"}
-      from ${FCT_DRIVER_TOPIC_RACE}
+      from ${topicRaceMart}
       ${whereClause(seasonFilter(season))}
       order by entity
     `,
@@ -246,7 +308,7 @@ function SeasonTopicsEvolution({ season }: { season: Season }) {
         session_date,
         topic_label,
         sum(message_count) as message_count
-      from ${FCT_DRIVER_TOPIC_RACE}
+      from ${topicRaceMart}
       ${whereClause(
         seasonFilter(season),
         groupBy === "all"
@@ -588,11 +650,12 @@ function SeasonSeriesChart({
   );
 }
 
-function TopicOverSeason({ season }: { season: Season }) {
+function TopicOverSeason({ season, classifier }: { season: Season; classifier: Classifier }) {
+  const { topicRaceMart } = CLASSIFIERS[classifier];
   const topicsQ = useSQLQuery(
     `
       select topic_label, sum(message_count) as total_messages
-      from ${FCT_DRIVER_TOPIC_RACE}
+      from ${topicRaceMart}
       ${whereClause(seasonFilter(season))}
       group by 1
       order by total_messages desc
@@ -636,7 +699,7 @@ function TopicOverSeason({ season }: { season: Season }) {
         ${breakdown === "total" ? "'Messages'" : breakdown === "team" ? "team_name" : "driver_acronym"} as entity,
         ${breakdown === "team" ? "any_value(team_colour) as team_colour," : ""}
         sum(message_count) as message_count
-      from ${FCT_DRIVER_TOPIC_RACE}
+      from ${topicRaceMart}
       ${whereClause(seasonFilter(season), `topic_label = '${effectiveTopic}'`)}
       group by 1, 2, 3, 4, 5, 6
       order by session_date
@@ -744,13 +807,16 @@ function TopicOverSeason({ season }: { season: Season }) {
  * deliberately bypassing buildStackedSeries's top-N-plus-"Other" bucketing.
  * Where the other tabs chart a handful of series over time and fold a long
  * tail away so the chart stays readable, this tab's whole point is that long
- * tail: how message volume is actually spread across every topic BERTopic
- * has surfaced, sparse ones included. */
-function TopicDistribution({ season }: { season: Season }) {
+ * tail: how message volume is actually spread across every topic the active
+ * classifier produced, sparse ones included. It's also the clearest side-by-side
+ * of the two classifiers — BERTopic's long tail includes its Uncategorized
+ * bucket, Jev's doesn't have one. */
+function TopicDistribution({ season, classifier }: { season: Season; classifier: Classifier }) {
+  const { topicRaceMart } = CLASSIFIERS[classifier];
   const rowsQ = useSQLQuery(
     `
       select year, topic_label, sum(message_count) as message_count
-      from ${FCT_DRIVER_TOPIC_RACE}
+      from ${topicRaceMart}
       ${whereClause(seasonFilter(season))}
       group by 1, 2
       order by year, message_count desc
@@ -970,11 +1036,12 @@ function WeekendRadioTimeline({ circuit, year }: { circuit: string; year: number
   );
 }
 
-function RaceTopicsDetail({ season }: { season: Season }) {
+function RaceTopicsDetail({ season, classifier }: { season: Season; classifier: Classifier }) {
+  const { topicRaceMart, messageTopicColumn } = CLASSIFIERS[classifier];
   const sessionsQ = useSQLQuery(
     `
       select distinct session_key, year, circuit_short_name, session_name, session_date
-      from ${FCT_DRIVER_TOPIC_RACE}
+      from ${topicRaceMart}
       ${whereClause(seasonFilter(season))}
       order by session_date
     `,
@@ -997,7 +1064,9 @@ function RaceTopicsDetail({ season }: { season: Season }) {
 
   const messagesQ = useSQLQuery(
     `
-      select driver_acronym, team_colour, lap_number, message_date, topic_label, transcript_text
+      select driver_acronym, team_colour, lap_number, message_date,
+        ${messageTopicColumn} as topic_label,
+        jev_speech_act_label, jev_topic_confidence, transcript_text
       from ${FCT_RADIO_MESSAGES}
       where session_key = ${effectiveSessionKey}
       order by message_date
@@ -1101,6 +1170,11 @@ function RaceTopicsDetail({ season }: { season: Season }) {
               <th className="py-2">Driver</th>
               <th className="py-2">Lap</th>
               <th className="py-2">Topic</th>
+              {/* Both Jev-only: BERTopic assigns one cluster per message, so
+                  it has no separate notion of what the speaker is doing, and
+                  no per-message confidence to show. */}
+              {classifier === "jev" ? <th className="py-2">Doing</th> : null}
+              {classifier === "jev" ? <th className="py-2">Conf.</th> : null}
               <th className="py-2">Transcript</th>
             </tr>
           </thead>
@@ -1112,6 +1186,22 @@ function RaceTopicsDetail({ season }: { season: Season }) {
                 </td>
                 <td className="py-1" style={{ color: "#6a6a6a" }}>{r.lap_number != null ? N(r.lap_number) : "—"}</td>
                 <td className="py-1" style={{ color: "#6a6a6a" }}>{String(r.topic_label)}</td>
+                {classifier === "jev" ? (
+                  <td className="py-1" style={{ color: "#6a6a6a" }}>
+                    {r.jev_speech_act_label != null ? String(r.jev_speech_act_label) : "—"}
+                  </td>
+                ) : null}
+                {classifier === "jev" ? (
+                  // Dimmed below 0.5 rather than hidden: a low-confidence
+                  // label is still the model's answer, it just shouldn't read
+                  // with the same weight as a certain one.
+                  <td
+                    className="py-1"
+                    style={{ color: N(r.jev_topic_confidence) < 0.5 ? "#adadad" : "#6a6a6a" }}
+                  >
+                    {r.jev_topic_confidence != null ? N(r.jev_topic_confidence).toFixed(2) : "—"}
+                  </td>
+                ) : null}
                 <td className="py-1" style={{ color: "#231f20" }}>{String(r.transcript_text)}</td>
               </tr>
             ))}
