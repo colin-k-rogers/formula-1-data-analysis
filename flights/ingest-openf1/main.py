@@ -11,6 +11,21 @@ already has the data stored and finished more than RECENCY_WINDOW ago is
 treated as final and skipped, so a run doesn't re-pull the whole season's
 data every time — only new, upcoming, or recently-finished sessions.
 """
+# Run-visualization chart; node ids join to the @flight-run lines below. The
+# convention is MotherDuck's flight viz guide (get_flight_viz_guide).
+#
+# @flight
+# flowchart TD
+#   sessions[Fetch sessions]:::extract --> any{Target sessions?}:::check
+#   any -->|none| nothing(Nothing to do)
+#   any -->|found| meetings[Fetch meetings]:::extract
+#   meetings --> plan[Pick sessions to refresh]:::query
+#   plan --> drivers[Fetch drivers]:::extract
+#   drivers --> laps[Fetch laps]:::extract
+#   laps --> load[Load raw tables]:::load
+#   class drivers,laps fraction
+#   class load fanout
+# @end-flight
 import json
 import os
 import time
@@ -38,6 +53,24 @@ RECENCY_WINDOW = timedelta(days=7)
 # and needs dim_sessions/dim_drivers (sourced from here) to actually have
 # session/meeting/driver metadata for them, not just for Race.
 TARGET_SESSION_NAMES = {"Race", "Qualifying", "Sprint"}
+
+
+# Node last marked running, so a crash can be pinned on the step it hit.
+_current = None
+
+
+def emit(node, status, **fields):
+    """Print one @flight-run progress line for the run-visualization chart."""
+    global _current
+    _current = (node, fields.get("key")) if status == "running" else None
+    fields["ts"] = datetime.now(timezone.utc).isoformat()
+    parts = [f"@flight-run {node} {status}"]
+    for name, value in fields.items():
+        value = " ".join(str(value).split())  # one event per line
+        if " " in value or '"' in value or "=" in value:
+            value = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        parts.append(f"{name}={value}")
+    print(" ".join(parts), flush=True)
 
 
 def fetch(endpoint, params):
@@ -165,25 +198,34 @@ def main():
     # with the Race session itself, and Qualifying is its own session_type,
     # so session_name is the only field that actually distinguishes the
     # sessions we want from practice/testing/Sprint Qualifying noise.
+    emit("sessions", "running")
     all_sessions = fetch("sessions", {"year": season_year})
+    emit("sessions", "ok", rows=len(all_sessions), effect="net:api.openf1.org/v1/sessions")
     # Cancelled sessions have no laps/drivers data at all (OpenF1 404s those
     # endpoints for them), so skip them too.
+    emit("any", "running")
     sessions = [
         s
         for s in all_sessions
         if s.get("session_name") in TARGET_SESSION_NAMES and not s.get("is_cancelled")
     ]
+    emit("any", "ok", rows=len(sessions))
 
     if not sessions:
+        emit("nothing", "running")
         print(f"No target sessions found for season {season_year}; nothing to do.")
+        emit("nothing", "ok")
         return
 
     session_keys = [s["session_key"] for s in sessions]
     meeting_keys = sorted({s["meeting_key"] for s in sessions})
 
+    emit("meetings", "running")
     all_meetings = fetch("meetings", {"year": season_year})
     meetings = [m for m in all_meetings if m["meeting_key"] in set(meeting_keys)]
+    emit("meetings", "ok", rows=len(meetings), effect="net:api.openf1.org/v1/meetings")
 
+    emit("plan", "running")
     con = duckdb.connect("md:")
     # Preview's RAW_SCHEMA (e.g. raw_preview_<branch>) won't exist yet the
     # first time a branch runs this Flight -- CREATE TABLE doesn't implicitly
@@ -202,37 +244,60 @@ def main():
     # enforced in that mart itself, not here -- see fct_lap_pace.sql.
     driver_refresh_keys = refresh_keys_for(con, "drivers", sessions, now)
     lap_refresh_keys = refresh_keys_for(con, "laps", sessions, now)
+    emit(
+        "plan", "ok",
+        drivers_refresh=f"{len(driver_refresh_keys)}/{len(session_keys)}",
+        laps_refresh=f"{len(lap_refresh_keys)}/{len(session_keys)}",
+    )
 
-    drivers = []
-    for session_key in driver_refresh_keys:
-        drivers.extend(fetch("drivers", {"session_key": session_key}))
-        time.sleep(INTER_REQUEST_SLEEP_SEC)
+    drivers = fetch_per_session("drivers", driver_refresh_keys)
+    laps = fetch_per_session("laps", lap_refresh_keys)
 
-    laps = []
-    for session_key in lap_refresh_keys:
-        laps.extend(fetch("laps", {"session_key": session_key}))
-        time.sleep(INTER_REQUEST_SLEEP_SEC)
-
-    n_meetings = load_table(
-        con, "/tmp/meetings.json", meetings, "meetings", ["meeting_key"], meeting_keys
-    )
-    n_sessions = load_table(
-        con, "/tmp/sessions.json", sessions, "sessions", ["session_key"], session_keys
-    )
-    n_drivers = load_table(
-        con, "/tmp/drivers.json", drivers, "drivers", ["session_key"], driver_refresh_keys
-    )
-    n_laps = load_table(
-        con, "/tmp/laps.json", laps, "laps", ["session_key"], lap_refresh_keys
-    )
+    loads = [
+        ("meetings", meetings, ["meeting_key"], meeting_keys),
+        ("sessions", sessions, ["session_key"], session_keys),
+        ("drivers", drivers, ["session_key"], driver_refresh_keys),
+        ("laps", laps, ["session_key"], lap_refresh_keys),
+    ]
+    counts = {}
+    for table, records, key_columns, key_values in loads:
+        emit("load", "running", key=table)
+        counts[table] = load_table(
+            con, f"/tmp/{table}.json", records, table, key_columns, key_values
+        )
+        emit("load", "ok", key=table, rows=counts[table], effect=f"table:f1.{RAW_SCHEMA}.{table}")
 
     print(
-        f"season={season_year} sessions={n_sessions} meetings={n_meetings} "
-        f"drivers={n_drivers} laps={n_laps} "
+        f"season={season_year} sessions={counts['sessions']} meetings={counts['meetings']} "
+        f"drivers={counts['drivers']} laps={counts['laps']} "
         f"drivers_refreshed={len(driver_refresh_keys)}/{len(session_keys)} "
         f"laps_refreshed={len(lap_refresh_keys)}/{len(session_keys)} sessions"
     )
 
 
+def fetch_per_session(endpoint, session_keys):
+    """Fetch `endpoint` for each session, reporting progress on the chart
+    node of the same name."""
+    total = len(session_keys)
+    emit(endpoint, "running", done=0, total=total)
+    records = []
+    for done, session_key in enumerate(session_keys, start=1):
+        records.extend(fetch(endpoint, {"session_key": session_key}))
+        emit(endpoint, "running", done=done, total=total)
+        time.sleep(INTER_REQUEST_SLEEP_SEC)
+    emit(endpoint, "ok", done=total, total=total, rows=len(records),
+         effect=f"net:api.openf1.org/v1/{endpoint}")
+    return records
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        emit("@flight", "ok", exit=0)
+    except Exception as err:
+        if _current:
+            node, key = _current
+            extra = {"key": key} if key else {}
+            emit(node, "failed", error=f"{type(err).__name__}: {err}", **extra)
+        emit("@flight", "failed", exit=1)
+        raise
