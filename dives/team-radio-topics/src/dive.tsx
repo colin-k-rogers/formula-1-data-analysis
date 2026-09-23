@@ -1062,11 +1062,17 @@ function RaceTopicsDetail({ season, classifier }: { season: Season; classifier: 
         : null;
   const effectiveSession = sessions.find((s) => N(s.session_key) === effectiveSessionKey);
 
+  // The jev_* columns are selected only under that classifier, not
+  // unconditionally: a Dive deploys the moment its PR merges, while the
+  // columns only appear when f1-transform-dbt next runs (weekly). Naming them
+  // in the BERTopic query too would take this view down with a binder error
+  // for that whole window, in a tab that otherwise needs nothing from Jev.
   const messagesQ = useSQLQuery(
     `
       select driver_acronym, team_colour, lap_number, message_date,
         ${messageTopicColumn} as topic_label,
-        jev_speech_act_label, jev_topic_confidence, transcript_text
+        ${classifier === "jev" ? "jev_speech_act_label, jev_topic_confidence," : ""}
+        transcript_text
       from ${FCT_RADIO_MESSAGES}
       where session_key = ${effectiveSessionKey}
       order by message_date

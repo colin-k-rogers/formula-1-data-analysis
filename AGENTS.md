@@ -44,6 +44,14 @@
   mixture of two taxonomies. `dbt/tests/assert_jev_labels_in_taxonomy.sql`
   only catches this when a label is renamed or removed, not when a
   description is reworded.
+- A Dive deploys on merge to `main`, but the dbt models it queries only
+  change when `f1-transform-dbt` next runs (weekly, or a manual run), so
+  there's a window where a freshly-deployed Dive is pointed at the old
+  marts. A Dive query must therefore never name a new column or table
+  outside the code path that actually needs it — otherwise a view that
+  didn't need the dbt change at all goes down with a binder error until the
+  Flight catches up. `dives/team-radio-topics`' session-detail query gates
+  its `jev_*` columns on the active classifier for exactly this reason.
 - A Dive's `export const REQUIRED_DATABASES = …` must stay on a single line:
   the deployer strips that declaration with a single-line regex, so a wrapped
   one deploys a Dive whose leftover array body is a syntax error. `make test`
