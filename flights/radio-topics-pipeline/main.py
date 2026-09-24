@@ -26,8 +26,9 @@ FETCH_TIMEOUT_SEC = 30
 PROJECT_DIR = pathlib.Path("/tmp/dbt_project")
 SKIP_DIRS = {"target", "dbt_packages", "logs"}
 
-# Expands to both stg_radio__* views, the seed, dim_radio_topics,
-# fct_radio_messages, fct_driver_topic_race, and their tests.
+# Expands to both stg_radio__* views, the seed, int_radio__jev_topics,
+# dim_radio_topics, fct_radio_messages, both fct_driver_*topic_race marts,
+# and their tests.
 DEFAULT_DBT_SELECT = "stg_radio__messages+ stg_radio__topics+ topic_name_overrides+"
 
 ENTRY_POINT = "local:///opt/radio_topic_modeling/job.py"

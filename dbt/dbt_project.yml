@@ -12,6 +12,11 @@ models:
     staging:
       +materialized: view
       +schema: "staging{{ var('schema_suffix', '') }}"
+    intermediate:
+      # Incremental (not view) on purpose -- int_radio__jev_topics pays a
+      # model call per row, so its output has to persist between runs.
+      +materialized: incremental
+      +schema: "intermediate{{ var('schema_suffix', '') }}"
     marts:
       +materialized: table
       +schema: "marts{{ var('schema_suffix', '') }}"

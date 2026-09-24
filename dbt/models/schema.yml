@@ -55,6 +55,19 @@ models:
           - unique
           - not_null
 
+  - name: int_radio__jev_topics
+    columns:
+      - name: radio_message_id
+        tests:
+          - unique
+          - not_null
+      - name: jev_topic
+        tests:
+          - not_null
+      - name: jev_speech_act
+        tests:
+          - not_null
+
   - name: dim_radio_topics
     columns:
       - name: topic_id
@@ -77,6 +90,13 @@ models:
       - name: transcript_text
         tests:
           - not_null
+      # Every message stg_radio__messages keeps also reaches
+      # int_radio__jev_topics, so a null here means the incremental model
+      # fell behind rather than that a message is legitimately unlabelled --
+      # prompt_jev always picks a label (its 'other' is a real label).
+      - name: jev_topic
+        tests:
+          - not_null
 
   - name: fct_driver_topic_race
     columns:
@@ -87,5 +107,17 @@ models:
         tests:
           - not_null
       - name: topic_id
+        tests:
+          - not_null
+
+  - name: fct_driver_jev_topic_race
+    columns:
+      - name: session_key
+        tests:
+          - not_null
+      - name: driver_number
+        tests:
+          - not_null
+      - name: topic_label
         tests:
           - not_null

@@ -48,7 +48,46 @@ Flight schedule:
 1. **[spark_jobs/radio_topic_modeling](spark_jobs/radio_topic_modeling)** is a PySpark job submitted as an [AWS EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/) job run (see its README for the full from-scratch AWS setup and the `aws emr-serverless start-job-run` command). It's incremental: each run only pulls and transcribes team-radio metadata from OpenF1 for sessions it hasn't already processed (with a local `faster-whisper` model distributed across executors), assigns topics into a BERTopic model persisted between runs so topic ids/labels stay stable race over race, and writes the results as two Iceberg tables registered in the AWS Glue Data Catalog (S3-backed). A PR touching this package also gets a staging counterpart to the Flights/Dives preview deploy above — see its README's "PR staging" section — that builds/pushes a branch-tagged image and lets a staging job run's output flow through a preview `f1-transform-dbt` run for full end-to-end testing.
 2. **[warehouse/setup_radio_lakehouse.sql](warehouse/setup_radio_lakehouse.sql)** is a one-time (not scheduled) script that attaches that Glue catalog into MotherDuck as the `radio_lakehouse` database via `CREATE SECRET` + `CREATE DATABASE ... TYPE ICEBERG ENDPOINT_TYPE 'glue'`. Once run, the attachment persists across every session and Flight — no copy-into-`f1.raw` step is needed.
 3. The same **`f1-transform-dbt`** Flight and [dbt](dbt) project stage `radio_lakehouse.raw.*` (see `models/sources.yml`) into `dim_radio_topics`, `fct_radio_messages` (each radio call joined to its driver, session, and in-progress lap), and `fct_driver_topic_race` (driver × session × topic message counts — the grain the Dive below charts).
-4. **[dives/team-radio-topics](dives/team-radio-topics)** is a Dive with three views: season evolution (stacked chart of a driver's or team's topic mix race-by-race), topic over season (stacked chart of one topic's volume race-by-race, broken down by team or driver), and race detail (topic breakdown plus the underlying radio messages for one session). As with `relative-lap-pace`, only one Dive source can be live in `.dive-preview/src/dive.tsx` at a time — copy in whichever one you're previewing.
+4. The same dbt project also classifies every message a **second** way — see [Two classifiers](#two-classifiers) below — producing `int_radio__jev_topics` and the parallel `fct_driver_jev_topic_race` mart.
+5. **[dives/team-radio-topics](dives/team-radio-topics)** is a Dive with four views: season evolution (stacked chart of a driver's or team's topic mix race-by-race), topic over season (stacked chart of one topic's volume race-by-race, broken down by team or driver), session detail (topic breakdown plus the underlying radio messages for one session), and topic distribution. A classifier toggle at the top switches every view between the two classifications. As with `relative-lap-pace`, only one Dive source can be live in `.dive-preview/src/dive.tsx` at a time — copy in whichever one you're previewing.
+
+### Two classifiers
+
+Team radio is labelled twice, by two methods with opposite failure modes, and
+the Dive shows either:
+
+- **BERTopic** (in the Spark job) *discovers* its clusters from the transcripts,
+  so it can surface a topic nobody thought to look for — but it clusters, and a
+  message that fits no cluster goes to `topic_id = -1`. About 30% of the corpus
+  lands there, and those messages are not unclassifiable, just unclustered.
+  Cluster ids also renumber on a refit, which is why `FORCE_REFIT` is a rare,
+  deliberate action and why `seeds/topic_name_overrides.csv` matches on keywords
+  rather than id.
+- **Jev** ([`prompt_jev`](https://motherduck.com/docs/sql-reference/motherduck-sql-reference/ai-functions/prompt-jev/),
+  TypeSafe's model, called from SQL inside MotherDuck) *picks* from a fixed list
+  of named topics. It labels every message, never renumbers, and returns a
+  calibrated confidence per message — but it can only ever find topics already
+  written down in [dbt/macros/jev_radio_taxonomy.sql](dbt/macros/jev_radio_taxonomy.sql),
+  which is exactly what BERTopic is for.
+
+They're complements, not a migration: `fct_radio_messages` carries both labels
+on every row, so the same message can be read either way.
+
+The Jev side lives in [`int_radio__jev_topics`](dbt/models/intermediate/int_radio__jev_topics.sql),
+an incremental model — each row is a paid model call, so a run only classifies
+messages it hasn't seen. Two taxonomies are applied, as separate `prompt_jev`
+calls: the subject (17 labels, deliberately overlapping BERTopic's so the two
+are comparable) and the speech act (what the speaker is *doing* — instructing,
+reporting, venting — which BERTopic can't express, since it has only one
+cluster slot per message to spend).
+
+Editing a label or description in `jev_radio_taxonomy.sql` re-teaches the
+classifier, but incremental rows keep their old labels: rebuild with
+`dbt build --select int_radio__jev_topics+ --full-refresh` afterwards.
+`tests/assert_jev_labels_in_taxonomy.sql` fails if you forget and a retired
+label is still on rows. `prompt_jev` needs a Lite or Business plan and an
+organization in `us-east-1` or `us-west-2`; a full reclassification of a
+season's few thousand messages is a small fraction of one AI Unit.
 
 ### Running the whole radio pipeline in one go
 
