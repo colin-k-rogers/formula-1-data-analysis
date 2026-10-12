@@ -53,7 +53,7 @@ MD_DATABASE = "f1"
 # main.stg_x ..... [OK in 0.12s]" or "3 of 40 FAIL 2 unique_x ..... [FAIL 2 in
 # 0.1s]". The node's name is the last word before the dot leader.
 DBT_PROGRESS = re.compile(
-    r"\b\d+ of (\d+) (START|OK|PASS|WARN|ERROR|FAIL|SKIP)\b(.*?)\s+\.*\s*\["
+    r"\b\d+ of \d+ (START|OK|PASS|WARN|ERROR|FAIL|SKIP)\b(.*?)\s+\.*\s*\["
 )
 DBT_STATUS = {
     "START": "running",
@@ -97,7 +97,7 @@ def run_dbt(args, node):
         m = DBT_PROGRESS.search(line)
         if not m:
             continue
-        verb, rest = m.group(2), m.group(3)
+        verb, rest = m.groups()
         name = rest.split()[-1]
         fields = {"key": name}
         # "OK created ... model main.x" / "OK loaded seed file main.x" persist
