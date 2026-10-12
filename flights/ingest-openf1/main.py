@@ -14,14 +14,12 @@ data every time — only new, upcoming, or recently-finished sessions.
 # Run-visualization chart; node ids join to the @flight-run lines below. The
 # convention is MotherDuck's flight viz guide (get_flight_viz_guide).
 #
-# DRIFT TEST: plan is really :::query; declared :::transform on purpose.
-#
 # @flight
 # flowchart TD
 #   sessions[Fetch sessions]:::extract --> any{Target sessions?}:::check
 #   any -->|none| nothing(Nothing to do)
 #   any -->|found| meetings[Fetch meetings]:::extract
-#   meetings --> plan[Pick sessions to refresh]:::transform
+#   meetings --> plan[Pick sessions to refresh]:::query
 #   plan --> drivers[Fetch drivers]:::extract
 #   drivers --> laps[Fetch laps]:::extract
 #   laps --> load[Load raw tables]:::load
@@ -211,7 +209,7 @@ def main():
         for s in all_sessions
         if s.get("session_name") in TARGET_SESSION_NAMES and not s.get("is_cancelled")
     ]
-    emit("any", "ok", rows=len(sessions), effect="file:/tmp/target_sessions.json")  # DRIFT TEST
+    emit("any", "ok", rows=len(sessions))
 
     if not sessions:
         emit("nothing", "running")
@@ -248,7 +246,6 @@ def main():
     lap_refresh_keys = refresh_keys_for(con, "laps", sessions, now)
     emit(
         "plan", "ok",
-        effect=f"table:f1.{RAW_SCHEMA}.drivers",  # DRIFT TEST
         drivers_refresh=f"{len(driver_refresh_keys)}/{len(session_keys)}",
         laps_refresh=f"{len(lap_refresh_keys)}/{len(session_keys)}",
     )
