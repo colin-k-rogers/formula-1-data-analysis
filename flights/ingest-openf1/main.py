@@ -16,7 +16,7 @@ data every time — only new, upcoming, or recently-finished sessions.
 #
 # @flight
 # flowchart TD
-#   sessions[Fetch sessions]:::extract --> any{Target sessions?}:::check
+#   sessions[Fetch sessions]:::extract --> any{Target sessions?}:::switch
 #   any -->|none| nothing(Nothing to do)
 #   any -->|found| meetings[Fetch meetings]:::extract
 #   meetings --> plan[Pick sessions to refresh]:::query
@@ -209,7 +209,7 @@ def main():
         for s in all_sessions
         if s.get("session_name") in TARGET_SESSION_NAMES and not s.get("is_cancelled")
     ]
-    emit("any", "ok", rows=len(sessions))
+    emit("any", "ok", rows=len(sessions), branch="found" if sessions else "none")
 
     if not sessions:
         emit("nothing", "running")

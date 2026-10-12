@@ -10,9 +10,22 @@ Requires two MotherDuck Flight secrets attached to this Flight:
   password)
 - `email_recipient` (param RECIPIENT_EMAIL — the address summaries are sent to)
 """
+# Run-visualization chart; node ids join to the @flight-run lines below. The
+# convention is MotherDuck's flight viz guide (get_flight_viz_guide).
+#
+# @flight
+# flowchart TD
+#   latest[Find the latest race]:::query --> found{Race to report?}:::switch
+#   found -->|none| nothing(Nothing to send)
+#   found -->|found| summary[Summarise driver pace]:::query
+#   summary --> laps[Read lap-by-lap gaps]:::query
+#   laps --> chart[Render pace chart]:::transform
+#   chart --> send[Send email]
+# @end-flight
 import io
 import os
 import smtplib
+from datetime import datetime, timezone
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -25,6 +38,24 @@ import matplotlib.pyplot as plt
 
 FCT_LAP_PACE = '"f1"."marts"."fct_lap_pace"'
 PALETTE = ["#0777b3", "#bd4e35", "#2d7a00", "#e18727", "#638CAD"]
+
+
+# Node last marked running, so a crash can be pinned on the step it hit.
+_current = None
+
+
+def emit(node, status, **fields):
+    """Print one @flight-run progress line for the run-visualization chart."""
+    global _current
+    _current = (node, fields.get("key")) if status == "running" else None
+    fields["ts"] = datetime.now(timezone.utc).isoformat()
+    parts = [f"@flight-run {node} {status}"]
+    for name, value in fields.items():
+        value = " ".join(str(value).split())  # one event per line
+        if " " in value or '"' in value or "=" in value:
+            value = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        parts.append(f"{name}={value}")
+    print(" ".join(parts), flush=True)
 
 
 def format_lap_time(seconds):
@@ -113,6 +144,7 @@ def send_email(subject, html, chart_png, recipient):
 
 
 def main():
+    emit("latest", "running")
     recipient = os.environ["email_recipient_RECIPIENT_EMAIL"]
     con = duckdb.connect("md:")
     con.execute("SET TimeZone = 'UTC';")
@@ -128,13 +160,19 @@ def main():
         order by session_date asc
         """
     ).fetchall()
+    emit("latest", "ok", rows=len(sessions))
+    emit("found", "running")
+    emit("found", "ok", branch="found" if sessions else "none")
     if not sessions:
+        emit("nothing", "running")
         print("No race sessions found; nothing to send.")
+        emit("nothing", "ok")
         return
 
     session_key, meeting_name, circuit_name, session_date = sessions[-1]
     race_date = session_date.strftime("%Y-%m-%d")
 
+    emit("summary", "running")
     summary_rows = (
         con.execute(
             f"""
@@ -153,8 +191,10 @@ def main():
         .to_dict("records")
     )
 
+    emit("summary", "ok", rows=len(summary_rows))
     top_drivers = [r["driver_acronym"] for r in summary_rows[:5]]
 
+    emit("laps", "running")
     lap_rows = (
         con.execute(
             f"""
@@ -167,13 +207,27 @@ def main():
         .to_dict("records")
     )
 
+    emit("laps", "ok", rows=len(lap_rows))
+    emit("chart", "running")
     chart_png = build_chart(lap_rows, top_drivers)
     html = build_html(meeting_name, circuit_name, race_date, summary_rows)
+    emit("chart", "ok")
     subject = f"F1 Race Pace Summary: {meeting_name}"
+    emit("send", "running")
     send_email(subject, html, chart_png, recipient)
+    emit("send", "ok", effect="net:smtp.gmail.com")
 
     print(f"Sent race pace summary for {meeting_name} ({race_date}) to {recipient}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        emit("@flight", "ok", exit=0)
+    except Exception as err:
+        if _current:
+            node, key = _current
+            extra = {"key": key} if key else {}
+            emit(node, "failed", error=f"{type(err).__name__}: {err}", **extra)
+        emit("@flight", "failed", exit=1)
+        raise
