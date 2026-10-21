@@ -270,7 +270,7 @@ jobs:
     env:
       # Read by both the Blueprints CLI and DuckDB's MotherDuck extension, so
       # this one setting points the whole deploy at staging.
-      motherduck_host: api.staging.motherduck.com
+      motherduck_host: ${{ secrets.MOTHERDUCK_HOST }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -280,7 +280,12 @@ jobs:
         env:
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
         run: |
-          if [ -n "$MOTHERDUCK_TOKEN" ]; then
+          # An unset host falls back to production -- with md_staging's
+          # prod-identical names -- so never deploy without one.
+          if [ -z "$motherduck_host" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "MotherDuck staging deploy skipped because the motherduck-md-staging environment has no MOTHERDUCK_HOST."
+          elif [ -n "$MOTHERDUCK_TOKEN" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
