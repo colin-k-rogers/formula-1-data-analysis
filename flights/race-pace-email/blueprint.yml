@@ -21,5 +21,9 @@ resources:
         - gmail_smtp
         - email_recipient
       targets:
+        # Staging has none of these secrets, and missing ones fail the
+        # deploy; there the Flight stops at its first step instead.
+        md_staging:
+          secrets: []
         preview:
           name: f1-race-pace-email:${target.branch} (Preview)

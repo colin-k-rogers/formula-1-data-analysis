@@ -32,6 +32,10 @@ resources:
         # dbt/dbt_project.yml) in preview; resolves to "" in prod.
         SCHEMA_SUFFIX: ${var.preview_suffix}
       targets:
+        # Staging has none of these secrets, and missing ones fail the
+        # deploy; there the Flight stops at its first step instead.
+        md_staging:
+          secrets: []
         preview:
           name: f1-radio-topics-pipeline:${target.branch} (Preview)
           # So a manually-triggered preview run builds this branch's dbt/
