@@ -19,6 +19,7 @@ on:
         type: choice
         options:
           - preview
+          - md_staging
           - prod
       branch:
         description: Preview branch name for manual preview deploys.
@@ -257,6 +258,65 @@ jobs:
                 body,
               });
             }
+
+  deploy-md-staging:
+    name: Deploy MotherDuck Staging Blueprints
+    needs:
+      - compute_changes
+      - validate
+    if: needs.compute_changes.outputs.changed_blueprints != '[]' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.target == 'md_staging'))
+    runs-on: ubuntu-latest
+    environment: motherduck-md-staging
+    env:
+      # Read by both the Blueprints CLI and DuckDB's MotherDuck extension, so
+      # this one setting points the whole deploy at staging.
+      motherduck_host: api.staging.motherduck.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check staging token
+        id: staging-token
+        shell: bash
+        env:
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+        run: |
+          if [ -n "$MOTHERDUCK_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "MotherDuck staging deploy skipped because the motherduck-md-staging environment has no MOTHERDUCK_TOKEN."
+          fi
+
+      - name: Plan MotherDuck staging blueprints
+        id: plan-md-staging
+        if: steps.staging-token.outputs.available == 'true'
+        uses: motherduckdb/motherduck-blueprints@v0
+        env:
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+        with:
+          command: plan
+          args: --target md_staging --blueprints "${{ needs.compute_changes.outputs.changed_csv }}"
+
+      - name: Summarize MotherDuck staging plan
+        if: steps.staging-token.outputs.available == 'true'
+        shell: bash
+        env:
+          PLAN_OUTPUT: ${{ steps.plan-md-staging.outputs.stdout }}
+        run: |
+          {
+            echo "### MotherDuck Staging Blueprint Plan"
+            echo
+            printf "%s\n" "$PLAN_OUTPUT"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy MotherDuck staging blueprints
+        if: steps.staging-token.outputs.available == 'true'
+        uses: motherduckdb/motherduck-blueprints@v0
+        env:
+          MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+        with:
+          command: deploy
+          args: --target md_staging --blueprints "${{ needs.compute_changes.outputs.changed_csv }}"
 
   deploy-prod:
     name: Deploy Production Blueprints

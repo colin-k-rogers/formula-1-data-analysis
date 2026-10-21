@@ -32,6 +32,19 @@ targets:
     variables:
       share_visibility: HIDDEN
 
+  # MotherDuck's own staging environment (api.staging.motherduck.com), not
+  # Blueprints' `staging` target -- that name switches main to release-
+  # promotion deploys. See README "Automated deploys".
+  md_staging:
+    mode: production
+    environment: motherduck-md-staging
+    deployment:
+      tokenEnvVar: MOTHERDUCK_TOKEN
+      identity: GitHub Actions MotherDuck-staging service account
+    variables:
+      preview_suffix: ""
+      share_visibility: DISCOVERABLE
+
   prod:
     mode: production
     environment: motherduck-production

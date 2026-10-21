@@ -23,6 +23,9 @@ resources:
       config:
         SCHEMA_SUFFIX: ${var.preview_suffix}
       targets:
+        # Run by hand there; see README "Automated deploys".
+        md_staging:
+          scheduleCron: ""
         preview:
           name: f1-transform-dbt:${target.branch} (Preview)
           scheduleCron: ""

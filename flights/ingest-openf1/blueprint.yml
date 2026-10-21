@@ -24,6 +24,9 @@ resources:
         # RAW_SCHEMA) in preview; resolves to "" in prod.
         SCHEMA_SUFFIX: ${var.preview_suffix}
       targets:
+        # Run by hand there; see README "Automated deploys".
+        md_staging:
+          scheduleCron: ""
         preview:
           name: f1-ingest-openf1:${target.branch} (Preview)
           scheduleCron: ""
